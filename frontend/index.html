@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SalesDesk CRM</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%235a5fe0'/><path d='M9 21l5-6 4 4 5-8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar" class="topbar" aria-hidden="true"></div>
+<div id="boot" class="boot" role="status" aria-live="polite"><div class="spin"></div><p id="bootMsg">Loading…</p></div>
+<div id="busy" class="busy hidden" role="status" aria-live="polite"><span class="spin sm"></span><span id="busyMsg"></span></div>
+<div id="login" class="login hidden">
+  <form id="loginForm" class="card login-card">
+    <h1>Sign in to SalesDesk</h1>
+    <label>Email<input type="email" id="lEmail" required autocomplete="username"></label>
+    <label>Password<input type="password" id="lPass" required autocomplete="current-password"></label>
+    <p class="err" id="lErr" role="alert"></p>
+    <button class="btn primary" type="submit" id="lBtn">Sign in</button>
+  </form>
+</div>
+<div class="app hidden" id="app">
+  <aside class="side" id="side" aria-label="Main navigation">
+    <div class="brand"><span class="logo">S</span><b>SalesDesk</b></div>
+    <nav id="nav"></nav>
+    <div class="side-foot" id="sideFoot"></div>
+  </aside>
+  <div class="main">
+    <header class="top">
+      <button class="icon-btn menu" id="menuBtn" aria-label="Toggle menu">&#9776;</button>
+      <label class="search"><span class="sr">Global search</span><input id="gsearch" placeholder="Search leads by name, company, email, phone…" autocomplete="off"></label>
+      <span class="demo-badge hidden" id="demoBadge" title="Sample data is visibly labelled. Switch USE_FIRESTORE=true for live data.">Demo data</span>
+      <span class="mock hidden" id="mockWrap"><label class="sr" for="mockSel">Test as</label><select id="mockSel"></select></span>
+      <button class="btn primary sm" id="quickAdd">+ Add lead</button>
+      <button class="icon-btn" id="themeBtn" aria-label="Toggle light or dark theme" title="Theme">☾</button>
+      <button class="icon-btn" id="aiBtn" aria-label="Open AI assistant" title="AI assistant">&#10024;</button>
+      <div class="me" id="me"></div>
+    </header>
+    <main id="view" class="content" tabindex="-1"></main>
+  </div>
+</div>
+<div id="drawer" class="drawer hidden" role="dialog" aria-modal="true"></div>
+<div id="aiPanel" class="drawer ai hidden" role="dialog" aria-label="AI assistant"></div>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script src="config.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

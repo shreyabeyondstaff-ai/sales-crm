@@ -1,0 +1,27 @@
+# Render Blueprint: one web service serves the API and the frontend (Dockerfile at the repo root).
+# Secrets are NOT stored here. APOLLO_API_KEY is prompted for at creation; the Firebase key goes in as a Secret File.
+services:
+  - type: web
+    name: sales-crm
+    runtime: docker
+    plan: free                      # free instances sleep after ~15 min idle; change to starter for always-on
+    healthCheckPath: /healthz
+    envVars:
+      - key: AUTH_DISABLED
+        value: "false"
+      - key: USE_FIRESTORE
+        value: "true"
+      - key: FIRST_LOGIN_POLICY
+        value: pending
+      - key: BOOTSTRAP_ADMIN_EMAILS
+        value: test123@gmail.com
+      - key: AI_PROVIDER
+        value: none
+      - key: SIGNAL_PROVIDER
+        value: demo
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/serviceAccount.json     # created as a Secret File named serviceAccount.json in the dashboard
+      - key: APOLLO_API_KEY
+        sync: false                                 # Render asks for the value; never commit it
+      - key: CRON_SECRET
+        generateValue: true                         # Render generates it; read it in the dashboard for your scheduler

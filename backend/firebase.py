@@ -1,7 +1,7 @@
 """Firebase Admin init, token verification and the data-access layer.
 Two interchangeable stores with the same tiny API: MemoryDB (demo) and FirestoreDB (real).
 """
-import os, uuid
+import os, uuid, json
 from datetime import datetime, timezone
 try:
     from dotenv import load_dotenv; load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -83,8 +83,14 @@ def _init_admin():
     if _admin: return
     import firebase_admin
     from firebase_admin import credentials
-    p = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    firebase_admin.initialize_app(credentials.Certificate(p) if p and os.path.exists(p) else None)
+    p, j = os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if j:                                   # whole key pasted as an env var (easy on Render: no file needed)
+        try: cred = credentials.Certificate(json.loads(j))
+        except Exception as e: raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_JSON is set but is not a valid service account JSON ({type(e).__name__}). Paste the full contents of the key file.")
+    elif p and os.path.exists(p): cred = credentials.Certificate(p)
+    elif p: raise RuntimeError(f"GOOGLE_APPLICATION_CREDENTIALS points to '{p}' but that file does not exist. On Render add a Secret File with exactly that name, or set FIREBASE_SERVICE_ACCOUNT_JSON instead.")
+    else: cred = None                       # Google Cloud: use the runtime's own identity
+    firebase_admin.initialize_app(cred)
     _admin = True
 
 def verify_token(token: str) -> dict:

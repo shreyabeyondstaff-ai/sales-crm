@@ -22,21 +22,6 @@ async function headers() {
   if (CFG.AUTH_ENABLED) { const t = S.fb ? await S.fb.getToken() : null; return t ? { Authorization: "Bearer " + t } : {}; }
   return { "X-Mock-User": localStorage.getItem("mockUser") || "u_admin" };
 }
-// ---- loading feedback: top bar + "what is happening" pill for anything slower than a blink
-const LOAD = { n: 0, show: null, slow: null, label: "" };
-const LABELS = [[/sync-campaigns/, "Syncing campaigns and leads from Apollo"], [/apollo\/search/, "Searching Apollo"], [/apollo\/import/, "Importing leads"], [/enrichment/, "Enriching leads"], [/imports\/upload/, "Uploading file"], [/imports\/.*\/(confirm|preview)/, "Processing import"], [/ai\/chat/, "Thinking"], [/today\/run/, "Running suggestions"]];
-const describe = (method, path) => (LABELS.find(([r]) => r.test(path)) || [])[1] || (method === "GET" ? "Loading" : "Saving");
-function loadStart(label, method) {
-  LOAD.n++; LOAD.label = label; if (LOAD.n > 1) return;
-  LOAD.show = setTimeout(() => {
-    $("#topbar").classList.add("on"); $("#busyMsg").textContent = LOAD.label + "…"; $("#busy").classList.remove("hidden");
-    LOAD.slow = setTimeout(() => { $("#busyMsg").textContent = LOAD.label + "… still working, this one is slow"; }, 6000);
-  }, method === "GET" ? 1200 : 300);
-}
-function loadEnd() {
-  if (--LOAD.n > 0) return; LOAD.n = 0; clearTimeout(LOAD.show); clearTimeout(LOAD.slow);
-  $("#topbar").classList.remove("on"); $("#busy").classList.add("hidden");
-}
 async function signOut() {
   try { await S.fb.A.signOut(S.fb.auth); } catch { }
   try { localStorage.removeItem("crm_uid"); } catch { }
@@ -45,7 +30,6 @@ async function signOut() {
 let expiring = false;
 function sessionExpired() { if (expiring) return; expiring = true; toast("Your session expired. Please sign in again.", true); setTimeout(signOut, 1500); }
 async function api(path, { method = "GET", body, form, raw } = {}) {
-  loadStart(describe(method, path), method);
   try {
     const h = await headers(); let b;
     if (form) b = form; else if (body !== undefined) { h["Content-Type"] = "application/json"; b = JSON.stringify(body); }
@@ -59,7 +43,7 @@ async function api(path, { method = "GET", body, form, raw } = {}) {
       throw e;
     }
     return j;
-  } finally { loadEnd(); }
+  } finally { }
 }
 async function download(path, name, method = "GET", body) {
   try { const r = await api(path, { raw: true, method, body }); const u = URL.createObjectURL(await r.blob()); const a = Object.assign(document.createElement("a"), { href: u, download: name }); a.click(); URL.revokeObjectURL(u); }
@@ -142,7 +126,7 @@ async function route() {
   const my = ++ROUTE_SEQ; let p = location.hash.slice(2).split("/")[0] || "today"; let item = NAV.find(n => n[0] === p);
   if (!item || !can(item[3])) { p = NAV.find(n => can(n[3]))?.[0] || "overview"; item = NAV.find(n => n[0] === p); history.replaceState(null, "", "#/" + p); }   // keep the URL honest
   renderNav(); const view = $("#view"), v = document.createElement("div");      // fresh container: a slow old page can never paint over a newer one
-  v.innerHTML = `<div class="pageload"><div class="spin"></div><span class="pl-msg">Loading ${esc(item?.[1] || "page")}…</span></div>${sk(5)}`; view.replaceChildren(v);
+  v.innerHTML = `<div class="pageload"><div class="spin"></div><span class="pl-msg">Loading ${esc(item?.[1] || "page")}…</span></div>`; view.replaceChildren(v);
   const slow = setTimeout(() => { const m = v.querySelector(".pl-msg"); if (m) m.textContent = `Still loading ${item?.[1] || "page"}… the server may be waking up.`; }, 5000);
   try { await PAGES[p](v); }
   catch (e) { if (my !== ROUTE_SEQ) return; v.innerHTML = `<div class="card">${empty("Could not load this page", e.message)}<div style="text-align:center"><button class="btn primary" id="retry">Try again</button></div></div>`; v.querySelector("#retry").onclick = route; }

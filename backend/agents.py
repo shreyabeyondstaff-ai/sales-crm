@@ -1,5 +1,5 @@
 """Today command center. Rule-based "agents" PROPOSE work; nothing is applied without a person approving it.
-Scoring and ranking are deterministic. Web/LLM is used only to FIND signals (with source links), never to decide.
+Scoring and ranking are deterministic: CRM data plus each lead's `signal` column (typed, imported or uploaded by a person). No web or AI lookups.
 Runs: manually (Run now), or by an external scheduler hitting POST /api/v1/cron/run 3x/day."""
 import os, re, json, hashlib, random, threading
 from datetime import datetime, timedelta, timezone
@@ -10,8 +10,7 @@ import services as sv
 SYSTEM = {"id": "system", "name": "Scheduler", "role": "admin"}
 HOURS = [int(x) for x in os.getenv("SCHEDULE_HOURS", "8,13,18").split(",") if x.strip()]
 CAP_PER_OWNER = 5            # max open suggestions per person: keeps the inbox readable
-SIGNAL_LIMIT = 15            # max leads whose company is searched per run (cost control)
-AGENTS = {"triage": "triage", "prep": "call prep", "scout": "signal scout", "cleaner": "data cleaner", "watcher": "stale watcher", "digest": "digest"}
+AGENTS = {"triage": "triage", "prep": "call prep", "cleaner": "data cleaner", "watcher": "stale watcher", "digest": "digest"}
 LOCK = threading.Lock()
 
 def g(items, key):
@@ -29,60 +28,8 @@ def last_run():
 def event(agent, text, owner=None, lead_id=None):
     db.put("agentEvents", uid("evt"), {"at": now(), "agent": agent, "text": text, "owner_id": owner, "lead_id": lead_id})
 
-# ----------------------------------------------------------------------------- signal providers
-def provider(): return os.getenv("SIGNAL_PROVIDER", "demo").lower()     # demo | claude_web | off
-
-def provider_info():
-    p = provider()
-    if p == "demo": return {"id": p, "label": "Demo signals (not real)", "ok": True, "demo": True, "note": "Set SIGNAL_PROVIDER=claude_web to search the real web."}
-    if p == "claude_web":
-        ok = bool(os.getenv("ANTHROPIC_API_KEY")); return {"id": p, "label": "Claude web search", "ok": ok, "demo": False, "note": None if ok else "Set ANTHROPIC_API_KEY"}
-    return {"id": "off", "label": "Signals off", "ok": True, "demo": False, "note": None}
-
-def _demo(l):
-    rnd = random.Random(l["id"])
-    if rnd.random() > .3: return []
-    t = rnd.choice([("hiring", f"Hiring {rnd.randint(2, 6)} sales roles"), ("funding", "Announced a new funding round"), ("leadership", "New VP of Sales appointed"), ("expansion", "Opening a second office")])
-    return [{"type": t[0], "summary": t[1], "url": "", "date": "", "source": "demo", "demo": True, "verified": False}]
-
-def _claude_web(l):
-    """Real web signals via Claude's web search tool. Sends ONLY the company name/website (no personal data).
-    TODO(INTEGRATION): confirm model name + web_search tool version in current Anthropic docs, then test."""
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key or not l.get("company"): return []
-    import httpx
-    q = (f'Find public, recent (last 90 days) business signals for the company "{l["company"]}"' + (f' ({l["website"]})' if l.get("website") else "") +
-         ". Useful: funding, hiring, leadership changes, launches, expansion, notable news. Reply with ONLY JSON: "
-         '{"signals":[{"type":"funding|hiring|leadership|launch|expansion|news","summary":"one sentence","url":"source url","date":"YYYY-MM-DD or empty"}]}. '
-         'Only include items you actually found with a real source URL. If nothing, reply {"signals":[]}.')
-    try:
-        r = httpx.post("https://api.anthropic.com/v1/messages", timeout=60, headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                       json={"model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5"), "max_tokens": 1000, "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}], "messages": [{"role": "user", "content": q}]})
-        r.raise_for_status(); txt = "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
-        m = re.search(r"\{.*\}", txt, re.S); data = json.loads(m.group(0)) if m else {}
-    except Exception: return []                      # a failed lookup is "no signal", never a made-up one
-    return [{"type": s.get("type", "news"), "summary": str(s["summary"])[:240], "url": s["url"], "date": s.get("date", ""), "source": "claude_web", "demo": False, "verified": False}
-            for s in data.get("signals", [])[:3] if str(s.get("url", "")).startswith("http") and s.get("summary")]
-
-def _generic_web(l):
-    """TODO(INTEGRATION): plug any search API here (Serper, Brave, Bing...). Return the same dict shape as _claude_web."""
-    return []
-
-def refresh_signals(leads):
-    p = provider(); fn = {"demo": _demo, "claude_web": _claude_web, "web": _generic_web}.get(p)
-    if not fn: return 0
-    used = 0; stale = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    for l in leads:
-        if used >= SIGNAL_LIMIT: break
-        if l.get("signals_checked_at") and l["signals_checked_at"] > stale: continue
-        for s in fn(l):
-            sid = "sig_" + hashlib.sha1((l["id"] + s["summary"]).encode()).hexdigest()[:10]   # idempotent
-            db.put("signals", sid, {**s, "lead_id": l["id"], "company": l.get("company", ""), "fetched_at": now()})
-        l["signals_checked_at"] = now(); db.put("leads", l["id"], l); used += 1
-    return used
-
 # ----------------------------------------------------------------------------- deterministic priority
-def score(l, tasks, acts, sigs, n, nd):
+def score(l, tasks, acts, n, nd):
     s, why = 0, []
     cb = [t for t in tasks if t["type"] == "callback" and t["due_at"][:10] <= n[:10]]; od = [t for t in tasks if t["due_at"] < n]
     if cb: s += 40; why.append("Callback due")
@@ -91,15 +38,15 @@ def score(l, tasks, acts, sigs, n, nd):
         age = (nd - sv.dt(l["created_at"])).days; s += min(25, 10 + age * 2); why.append(f"Never contacted ({age}d old)")
     last = acts[-1] if acts else None
     if last and last["outcome"] in ("Interested", "Meeting Requested", "Connected") and (nd - sv.dt(last["at"])).days <= 7: s += 20; why.append(f"Recent outcome: {last['outcome']}")
-    if sigs: s += 20; why.append("Fresh signal")
+    if (l.get("signal") or "").strip(): s += 25; why.append("Signal: " + l["signal"].strip()[:90])
     if l["stage"] in ("Connected", "Qualified", "Meeting Scheduled"): s += 10; why.append(f"Warm stage: {l['stage']}")
     if l.get("touches", 0) >= 4 and not any(a["outcome"] in sv.ENGAGED_ALL for a in acts): s -= 15; why.append("4+ touches without a response")
     return max(0, min(100, s)), why
 
-def brief(l, acts, sigs, why, ch="call", pitch="", sender=""):
+def brief(l, acts, why, ch="call", pitch="", sender=""):
     """Deterministic drafts. The CRM never sends anything: a person reviews, then sends from their own phone/LinkedIn/inbox."""
     first = l.get("first_name") or l["full_name"]; co = l.get("company") or "your team"; last = acts[-1] if acts else None
-    hook = sigs[0]["summary"].rstrip(".") if sigs else ""; src = (f" (source: {sigs[0]['url']})" if sigs and sigs[0].get("url") else " (demo signal)" if sigs else "")
+    hook = (l.get("signal") or "").strip().rstrip("."); src = f" (source: {l['signal_url']})" if hook and l.get("signal_url") else ""
     ctx = "Why now: " + "; ".join(why) + "."
     if ch == "linkedin":
         note = (f"Hi {first}, I came across {co} ({hook.lower()}). " if hook else f"Hi {first}, I work with teams like {co}. ") + f"We focus on {pitch}. Would be good to connect."
@@ -125,10 +72,8 @@ def _run(user, slot):
     n = now(); nd = datetime.now(timezone.utc); sd = sv.settings()["stale_days"]
     leads = [l for l in db.list("leads") if not l.get("archived")]; live = [l for l in leads if l["stage"] not in sv.TERMINAL and not l["suppressed"]]
     tasks = g([t for t in db.list("tasks") if t["status"] == "open"], "lead_id"); acts = g(sorted(db.list("activities"), key=lambda a: a["at"]), "lead_id")
-    def sigs():
-        cut = (nd - timedelta(days=30)).isoformat(); return g([s for s in db.list("signals") if s["fetched_at"] >= cut], "lead_id")
-    def rank(sm): return sorted(((score(l, tasks.get(l["id"], []), acts.get(l["id"], []), sm.get(l["id"], []), n, nd), l) for l in live), key=lambda x: -x[0][0])
-    ranked = rank(sigs()); checked = refresh_signals([l for _, l in ranked[:SIGNAL_LIMIT] if l.get("owner_id")]); sm = sigs(); ranked = rank(sm)
+    def rank(): return sorted(((score(l, tasks.get(l["id"], []), acts.get(l["id"], []), n, nd), l) for l in live), key=lambda x: (not (x[1].get("signal") or "").strip(), -x[0][0]))   # signal leads first, then by score
+    ranked = rank()
     old = db.list("suggestions"); blocked = set()
     for s in old:
         if s["status"] == "proposed" or (s["status"] == "dismissed" and s.get("decided_at", "") > (nd - timedelta(days=7)).isoformat()) or (s["status"] == "approved" and s.get("decided_at", "") > (nd - timedelta(days=1)).isoformat()): blocked.add(s["dedupe_key"])
@@ -138,14 +83,14 @@ def _run(user, slot):
         key = key or f"{kind}:{l['id']}"
         if key in blocked: return
         blocked.add(key); cands.append({"kind": kind, "channel": ch, "agent": agent, "lead_id": l["id"] if l else None, "lead_name": l["full_name"] if l else "", "owner_id": owner, "title": title, "body": body, "evidence": ev, "priority": pri, "action": action, "dedupe_key": key})
-    # call prep / triage / signal scout
+    # call prep / triage (leads with a signal rank first)
     for (sc, why), l in ranked[:30]:
         if sc < 30 or not l.get("owner_id"): continue
-        ls = sm.get(l["id"], []); ag = "scout" if ls else "triage" if any(w.startswith(("Callback", "overdue")) or "overdue" in w for w in why) else "prep"
-        ev = [{"text": w} for w in why] + [{"text": s["summary"], "url": s.get("url"), "demo": s.get("demo"), "source": s["source"]} for s in ls[:3]]
-        cc = camps.get(l.get("campaign_id"), {}).get("channel", "call"); cc = "call" if cc == "mixed" else cc; me = users_by.get(l["owner_id"], {}).get("name", "")
+        ag = "triage" if any(w.startswith(("Callback", "overdue")) or "overdue" in w for w in why) else "prep"
+        ev = [{"text": w} for w in why]
+        chs = sv.lead_channels(l, camps); cc = next((c for c in ("call", "linkedin", "email") if c in chs), "call"); me = users_by.get(l["owner_id"], {}).get("name", "")
         nm = l["full_name"]; ttl = {"call": f"Call {nm} today", "linkedin": f"LinkedIn: message {nm}", "email": f"Email {nm}"}[cc]; tt = {"call": f"Call {nm}", "linkedin": f"Send LinkedIn note to {nm}", "email": f"Send email to {nm}"}[cc]
-        add("call_brief", ag, l, ttl, brief(l, acts.get(l["id"], []), ls, why, cc, pitch, me), ev, sc, {"type": "create_task", "title": tt, "due_at": (nd + timedelta(hours=2)).isoformat(timespec="seconds")}, l["owner_id"], ch=cc)
+        add("call_brief", ag, l, ttl, brief(l, acts.get(l["id"], []), why, cc, pitch, me), ev, sc, {"type": "create_task", "title": tt, "due_at": (nd + timedelta(hours=2)).isoformat(timespec="seconds")}, l["owner_id"], ch=cc)
     # stale watcher
     cut = (nd - timedelta(days=sd)).isoformat(); cnt = 0
     for l in live:
@@ -171,12 +116,7 @@ def _run(user, slot):
                 seen.add(d["id"]); add("archive_duplicate", "cleaner", d, f"Archive duplicate of {keep['full_name']}", f"{d['full_name']} shares the same {field} as {keep['full_name']} (created {keep['created_at'][:10]}). Archiving keeps history and can be reversed.", [{"text": f"Same {field}: {k}"}], 30, {"type": "archive"}, d.get("owner_id"))
     need = sorted([l for l in live if l.get("enrichment_state") == "not_enriched" and (not l.get("phone") or not l.get("email"))], key=lambda l: l["created_at"], reverse=True)[:10]
     if need: add("enrich", "cleaner", None, f"Enrich {len(need)} leads missing phone or email", "Leads: " + ", ".join(l["full_name"] for l in need) + ".\nThis may use provider credits. Existing and verified values are never overwritten.", [{"text": "Missing contact data"}], 22, {"type": "enrich", "lead_ids": [l["id"] for l in need]}, None, key="enrich:" + hashlib.sha1(",".join(sorted(l["id"] for l in need)).encode()).hexdigest()[:10])
-    # triage: unassigned leads
-    workers = [u for u in db.list("users") if u["role"] in ("caller", "outreach") and u.get("active", True)]; load = Counter(l.get("owner_id") for l in live)
-    for l in sorted([l for l in live if not l.get("owner_id")], key=lambda l: l["created_at"])[:8]:
-        if not workers: break
-        w = min(workers, key=lambda u: load[u["id"]]); load[w["id"]] += 1; age = (nd - sv.dt(l["created_at"])).days
-        add("assign", "triage", l, f"Assign {l['full_name']} to {w['name']}", f"{l['full_name']} has no owner. {w['name']} currently has the lightest queue ({load[w['id']] - 1} active leads).", [{"text": f"Unassigned for {age} days"}, {"text": f"{w['name']}: {load[w['id']] - 1} active leads"}], 35 + min(15, age), {"type": "assign", "owner_id": w["id"]}, None)
+    # unassigned leads are handled in batches on the Intake / Assign pages, not as one suggestion per lead
     # cap per owner, keep the best
     created = Counter(); dropped = 0
     for owner, items in _by_owner(cands).items():
@@ -184,10 +124,10 @@ def _run(user, slot):
         for c in items[:room]: db.put("suggestions", uid("sug"), {**c, "status": "proposed", "created_at": n, "run_slot": slot}); created[c["agent"]] += 1
     overdue = sum(t["due_at"] < n for ts in tasks.values() for t in ts); unassigned = sum(not l.get("owner_id") for l in live)
     db.put("suggestions", "sug_digest", {"kind": "digest", "channel": "ops", "agent": "digest", "lead_id": None, "lead_name": "", "owner_id": None, "title": "Run summary", "status": "proposed", "priority": 5, "created_at": n, "dedupe_key": "digest", "action": None, "evidence": [],
-            "body": f"{len(live)} active leads reviewed. {sum(created.values())} new suggestions ({', '.join(f'{AGENTS[k]} {v}' for k, v in created.items()) or 'none'}).\n{overdue} overdue follow-ups, {unassigned} unassigned leads, {checked} companies checked for signals.\nNothing has been changed. Approve or dismiss each suggestion."})
-    run = db.put("agentRuns", uid("run"), {"at": n, "slot": slot, "by": user["name"], "provider": provider(), "reviewed": len(live), "created": dict(created), "dropped_by_cap": dropped, "signals_checked": checked})
+            "body": f"{len(live)} active leads reviewed. {sum(created.values())} new suggestions ({', '.join(f'{AGENTS[k]} {v}' for k, v in created.items()) or 'none'}).\n{overdue} overdue follow-ups, {unassigned} unassigned leads, {sum(bool((l.get("signal") or "").strip()) for l in live)} leads with a signal.\nNothing has been changed. Approve or dismiss each suggestion."})
+    run = db.put("agentRuns", uid("run"), {"at": n, "slot": slot, "by": user["name"], "reviewed": len(live), "created": dict(created), "dropped_by_cap": dropped})
     for k, v in created.items(): event(k, f"proposed {v} item(s)")
-    event("digest", f"Run finished ({slot}): {sum(created.values())} suggestions, {checked} companies checked")
+    event("digest", f"Run finished ({slot}): {sum(created.values())} suggestions")
     sv.audit(user, "agent.run", "agentRun", run["id"], f"{sum(created.values())} suggestions"); return run
 
 def _by_owner(c):
@@ -222,22 +162,56 @@ def dismiss(user, sid, reason=""):
     s = _get(user, sid); s.update(status="dismissed", decided_at=now(), decided_by=user["id"], reason=reason[:200]); db.put("suggestions", sid, s)
     sv.audit(user, "agent.dismiss", "suggestion", sid, s["title"]); return s
 
+# ----------------------------------------------------------------------------- My day (the caller's Today: a live work list, no approval queue)
+LEAD_FIELDS = ("id", "first_name", "last_name", "full_name", "title", "company", "phone", "email", "linkedin_url", "stage", "signal", "signal_url", "campaign_id", "touches", "last_activity_at",
+               "next_action", "next_action_due", "owner_id", "source", "created_at")
+BRIEF_LIMIT = 60      # talking points are prepared for the first N rows only
+
+def my_day(user):
+    """Every lead assigned to the user, in working order: callbacks due, follow-ups due or overdue, new leads not contacted yet (ranked by fit), then the rest
+    of their assigned leads. Visibility is simply assignment (not channel, not whether Apollo already emailed them). Nothing waits for approval."""
+    n = now(); end = n[:10] + "T23:59:59"
+    leads = [l for l in sv.active_leads(user, owner_id=user["id"], suppressed=False) if l["stage"] not in sv.TERMINAL]; byid = {l["id"]: l for l in leads}
+    tasks = g(sv.list_tasks(user, "mine", "open"), "lead_id"); camps = {c["id"]: c for c in db.list("campaigns")}; items = []
+    for l in leads:
+        ts = tasks.get(l["id"], []); cb = sorted((t for t in ts if t["type"] == "callback" and t["due_at"] <= end), key=lambda t: t["due_at"])
+        fu = sorted((t for t in ts if t["type"] not in ("callback", "first_contact") and t["due_at"] <= end), key=lambda t: t["due_at"])     # the system's first-contact reminder just means "new lead"
+        if cb: grp, rank, t = "callbacks", 0, cb[0]
+        elif fu: grp, rank, t = "followups", 1, fu[0]
+        elif not l.get("last_activity_at"): grp, rank, t = "new", 2, None
+        else: grp, rank, t = "other", 3, None                      # assigned and already in progress: still hers, so still listed
+        fit, why = sv.fit_score(l)
+        items.append({"group": grp, "rank": rank, "due_at": t["due_at"] if t else None, "overdue": bool(t and t["due_at"] < n), "fit": fit, "fit_why": why,
+                      "reason": "New lead, not contacted yet" if grp == "new" else f"Last activity {l['last_activity_at'][:10]}" if grp == "other" else f"{'Overdue' if t['due_at'] < n else 'Due today'}: {t['title']}",
+                      "lead": {k: l.get(k) for k in LEAD_FIELDS} | {"channels": sv.lead_channels(l, camps)}})
+    items.sort(key=lambda x: (x["rank"], x["due_at"] or "", -x["fit"], x["lead"]["created_at"]))
+    top = items[:BRIEF_LIMIT]; acts = g(sorted(sv.for_leads("activities", [x["lead"]["id"] for x in top]), key=lambda a: a["at"]), "lead_id"); pitch = sv.settings()["pitch"]
+    for x in top:
+        sig = [w["label"] for w in x["fit_why"] if w["label"].startswith("Signal:")]
+        x["brief"] = brief(byid[x["lead"]["id"]], acts.get(x["lead"]["id"], []), [x["reason"]] + sig, "call", pitch, user["name"])
+        x["recent"] = [{"type": a["type"], "outcome": a["outcome"], "at": a["at"], "notes": (a.get("notes") or "")[:160]} for a in acts.get(x["lead"]["id"], [])[-3:]][::-1]
+    mine = [a for a in db.query("activities", [("user_id", "==", user["id"])]) if a["at"][:10] == n[:10]]; c = Counter(x["group"] for x in items)
+    ls, ac, ts, op = sv.scoped(user, {}); s7, e7 = sv.period(7); k = sv.kpis(ls, ac, ts, op, s7, e7)
+    return {"tiles": {"to_call": c["callbacks"] + c["followups"] + c["new"], "assigned": len(items), "other": c["other"], "callbacks": c["callbacks"], "followups": c["followups"], "new": c["new"], "done_today": len(mine), "connected_today": sum(a["type"] == "phone_call" and a["outcome"] in sv.CONNECTED for a in mine)},
+            "week": {"calls": k["attempts"], "connected": k["connected"], "meetings": k["meetings"], "tasks_done": sum(t["status"] == "done" and sv.inp(t.get("completed_at"), s7, e7) for t in ts)},
+            "items": items[:200], "total": len(items)}
+
 # ----------------------------------------------------------------------------- Today view
 def today(user):
-    L = {l["id"]: l for l in db.list("leads")}; sg = g([s for s in db.list("signals") if s["fetched_at"] >= (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()], "lead_id")
+    L = {l["id"]: l for l in db.list("leads")}
     acts = g(sorted(db.list("activities"), key=lambda a: a["at"]), "lead_id"); items = []
-    for s in sorted(db.list("suggestions"), key=lambda s: -s["priority"]):
+    for s in sorted(db.list("suggestions"), key=lambda s: (not ((L.get(s.get("lead_id")) or {}).get("signal") or "").strip(), -s["priority"])):   # signal leads first
         if s["status"] != "proposed" or (user["role"] == "caller" and s.get("owner_id") != user["id"]): continue
         l = L.get(s.get("lead_id")); d = dict(s)
-        if l: d["lead"] = {k: l.get(k) for k in ("id", "full_name", "title", "company", "stage", "phone", "email", "source", "owner_id", "next_action", "next_action_due", "attempts", "touches", "campaign_id", "linkedin_url", "last_activity_at")}; d["signals"] = sg.get(l["id"], [])[:3]; d["recent"] = [{"outcome": a["outcome"], "at": a["at"], "notes": a.get("notes", "")} for a in acts.get(l["id"], [])[-3:]][::-1]
+        if l: d["lead"] = {k: l.get(k) for k in ("id", "full_name", "title", "company", "stage", "phone", "email", "source", "owner_id", "next_action", "next_action_due", "attempts", "touches", "campaign_id", "linkedin_url", "last_activity_at", "signal", "signal_url")}; d["recent"] = [{"outcome": a["outcome"], "at": a["at"], "notes": a.get("notes", "")} for a in acts.get(l["id"], [])[-3:]][::-1]
         if d["kind"] == "enrich": d["leads"] = [{"id": i, "name": L[i]["full_name"]} for i in s["action"]["lead_ids"] if i in L]
         items.append(d)
     ls, ac, ts, op = sv.scoped(user, {}); s7, e7 = sv.period(7); k = sv.kpis(ls, ac, ts, op, s7, e7); vis = {l["id"] for l in ls}
     mine = [s for s in db.list("suggestions") if sv.inp(s.get("decided_at"), s7, e7) and (user["role"] != "caller" or s.get("owner_id") == user["id"])]
     week = {"leads_added": k["new_leads"], "calls": k["attempts"], "connected": k["connected"], "unique_contacted": k["unique_contacted"], "meetings": k["meetings"],
-            "tasks_done": sum(t["status"] == "done" and sv.inp(t.get("completed_at"), s7, e7) for t in ts), "signals_found": sum(sv.inp(s["fetched_at"], s7, e7) and s["lead_id"] in vis for s in db.list("signals")),
+            "tasks_done": sum(t["status"] == "done" and sv.inp(t.get("completed_at"), s7, e7) for t in ts), "leads_with_signal": sum(bool((l.get("signal") or "").strip()) and l["stage"] not in sv.TERMINAL for l in ls),
             "approved": sum(s["status"] == "approved" for s in mine), "dismissed": sum(s["status"] == "dismissed" for s in mine)}
     lanes = Counter(l["stage"] for l in ls); st = sv.settings()["stages"]
     feed = [e for e in sorted(db.list("agentEvents"), key=lambda e: e["at"], reverse=True) if user["role"] != "caller" or e.get("owner_id") in (None, user["id"])][:14]
     lr = last_run()
-    return {"suggestions": items, "week": week, "lanes": [{"stage": s, "count": lanes[s]} for s in st], "feed": feed, "status": {"last_run": lr["at"] if lr else None, "last_by": lr["by"] if lr else None, "next_run": schedule(), "provider": provider_info(), "cap": CAP_PER_OWNER, "hours": sorted(HOURS)}}
+    return {"suggestions": items, "week": week, "lanes": [{"stage": s, "count": lanes[s]} for s in st], "feed": feed, "status": {"last_run": lr["at"] if lr else None, "last_by": lr["by"] if lr else None, "next_run": schedule(), "cap": CAP_PER_OWNER, "hours": sorted(HOURS)}}

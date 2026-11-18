@@ -69,6 +69,25 @@ function tag(s) { return `<span class="tag">${esc(s)}</span>`; }
 const CH = { call: ["☎", "Calls"], linkedin: ["in", "LinkedIn"], email: ["✉", "Email"], mixed: ["◎", "Multi-channel"], ops: ["⚙", "Pipeline"] };
 const chBadge = c => `<span class="chb ${c}">${CH[c]?.[0] || ""} ${CH[c]?.[1] || esc(c)}</span>`;
 const campOf = id => S.campaigns.find(c => c.id === id) || { id: "none", name: "No campaign", channel: "mixed", color: "#9aa0b4" };
+const CH_OPTS = [["call", "Calls"], ["linkedin", "LinkedIn"], ["email", "Email"]];
+const leadChannels = l => (l.channels && l.channels.length) ? l.channels : (c => ["call", "linkedin", "email"].includes(c) ? [c] : [])(campOf(l.campaign_id).channel);
+const targetHtml = id => `<div class="card target" id="${id}"><b>Where should these leads go?</b>
+  <div class="bar" style="margin:8px 0"><span class="muted">Channels (tick every one you will use):</span>${CH_OPTS.map(([v, lb]) => `<label class="chk"><input type="checkbox" class="it-ch" value="${v}"> ${lb}</label>`).join("")}</div>
+  <div class="bar"><label style="min-width:240px">Campaign<select class="it-camp"></select></label><label class="it-newl hidden" style="min-width:240px">New campaign name<input class="it-new" maxlength="80" placeholder="e.g. Fintech VPs Q1"></label>${can("assign") ? `<label style="min-width:220px">Assign to<select class="it-own">${userOpts("", "Unassigned")}</select></label>` : ""}</div>
+  <p class="muted" style="margin:6px 0 0">Each lead appears in the matching Sales Activity tab for every channel you tick, for its owner. Callers only see leads assigned to them.</p></div>`;
+function bindTarget(root) {
+  const camp = $(".it-camp", root), nl = $(".it-newl", root);
+  camp.innerHTML = `<option value="">No campaign</option>${can("assign") ? '<option value="__new">New campaign…</option>' : ""}${S.campaigns.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}`;
+  const sync = () => nl.classList.toggle("hidden", camp.value !== "__new"); sync();
+  camp.onchange = () => { sync(); const c = S.campaigns.find(x => x.id === camp.value); if (c && ["call", "linkedin", "email"].includes(c.channel) && !$$(".it-ch", root).some(i => i.checked)) $$(".it-ch", root).forEach(i => { i.checked = i.value === c.channel; }); };
+}
+function readTarget(root) {
+  const channels = $$(".it-ch", root).filter(i => i.checked).map(i => i.value), v = $(".it-camp", root).value, name = ($(".it-new", root).value || "").trim();
+  if (!channels.length) throw new Error("Choose at least one channel (Calls, LinkedIn or Email)");
+  if (v === "__new" && !name) throw new Error("Type a name for the new campaign");
+  return { channels, campaign_id: v && v !== "__new" ? v : null, new_campaign_name: v === "__new" ? name : null, owner_id: $(".it-own", root)?.value || null };
+}
+const refreshCampaigns = async () => { try { S.campaigns = (await api("/meta")).campaigns; } catch { } };
 const campOpts = (sel, blank) => opts(S.campaigns.map(c => [c.id, c.name]), sel, blank);
 const TYPE_OF = { call: "phone_call", linkedin: "linkedin", email: "email", mixed: "phone_call" };
 const initials = id => (uname(id) || "?").split(" ").map(x => x[0]).join("").slice(0, 2);
@@ -112,18 +131,19 @@ const dchip = (pct, inv) => pct == null ? "" : `<span class="dchip ${pct === 0 ?
 
 // ---------------------------------------------------------------- navigation
 const NAV = [
-  ["today", "Today", "◎", "reports:read"], ["overview", "Overview", "▦", "reports:read"], ["leads", "Leads", "☰", "leads:read"], ["discovery", "Lead Discovery", "⌕", "import"],
-  ["workspace", "Sales Activity", "✆", "activities:write"], ["followups", "Activities & Follow-ups", "✓", "tasks:read"], ["opportunities", "Opportunities", "◆", "opps:read"],
+  ["intake", "New data", "▣", "assign"], ["today", "Today", "◎", "reports:read", ["admin"]], ["overview", "Overview", "▦", "reports:read"], ["leads", "Leads", "☰", "leads:read"], ["assign", "Assign leads", "⇉", "assign"], ["discovery", "Lead Discovery", "⌕", "import"],
+  ["workspace", "Sales Activity", "✆", "activities:write", ["admin"]], ["followups", "Activities & Follow-ups", "✓", "tasks:read"], ["opportunities", "Opportunities", "◆", "opps:read"],
   ["reports", "Reports & Analytics", "▤", "reports:read"], ["assistant", "AI Assistant", "✨", "ai:use"], ["integrations", "Integrations", "⇄", "integrations:read"], ["settings", "Settings", "⚙", "settings:read"]];
+const homePage = () => (S.me && S.me.role === "admin") ? "intake" : "today";
 const PAGES = {};
 function renderNav() {
-  const cur = location.hash.slice(2).split("/")[0] || "today";
-  $("#nav").innerHTML = NAV.filter(n => can(n[3])).map(n => `<a class="nav-i ${n[0] === cur ? "on" : ""}" href="#/${n[0]}" data-p="${n[0]}"><span class="ic">${n[2]}</span>${esc(n[1])}</a>`).join("");
+  const cur = location.hash.slice(2).split("/")[0] || homePage();
+  $("#nav").innerHTML = NAV.filter(n => can(n[3]) && !(n[4] || []).includes(S.me.role)).map(n => `<a class="nav-i ${n[0] === cur ? "on" : ""}" href="#/${n[0]}" data-p="${n[0]}"><span class="ic">${n[2]}</span>${esc(n[1])}</a>`).join("");
   $("#side").classList.remove("open");
 }
 let ROUTE_SEQ = 0;
 async function route() {
-  const my = ++ROUTE_SEQ; let p = location.hash.slice(2).split("/")[0] || "today"; let item = NAV.find(n => n[0] === p);
+  const my = ++ROUTE_SEQ; let p = location.hash.slice(2).split("/")[0] || homePage(); let item = NAV.find(n => n[0] === p);
   if (!item || !can(item[3])) { p = NAV.find(n => can(n[3]))?.[0] || "overview"; item = NAV.find(n => n[0] === p); history.replaceState(null, "", "#/" + p); }   // keep the URL honest
   renderNav(); const view = $("#view"), v = document.createElement("div");      // fresh container: a slow old page can never paint over a newer one
   v.innerHTML = `<div class="pageload"><div class="spin"></div><span class="pl-msg">Loading ${esc(item?.[1] || "page")}…</span></div>`; view.replaceChildren(v);
@@ -136,13 +156,66 @@ async function route() {
 const head = (t, sub, actions = "") => `<div class="page-h"><div><h1>${esc(t)}</h1>${sub ? `<p>${esc(sub)}</p>` : ""}</div><div class="bar" style="margin:0">${actions}</div></div>`;
 
 // ---------------------------------------------------------------- TODAY (command center; nothing changes until a person approves)
-const AGN = { triage: "triage", prep: "call prep", scout: "signal scout", cleaner: "data cleaner", watcher: "stale watcher", digest: "digest" };
+const AGN = { triage: "triage", prep: "call prep", cleaner: "data cleaner", watcher: "stale watcher", digest: "digest" };
 const agTag = a => `<span class="ag ${esc(a)}">${esc(AGN[a] || a)}</span>`;
 const scCls = n => n >= 60 ? "sc" : "sc mid";
 const ago = s => { if (!s) return "never"; const m = Math.round((Date.now() - new Date(s)) / 6e4); return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 1440 ? Math.round(m / 60) + " h ago" : Math.round(m / 1440) + " d ago"; };
 const TILES = [["call", "☎", "Calls to make", "var(--ok)", "var(--ok-soft)"], ["linkedin", "in", "LinkedIn touches", "var(--info)", "var(--info-soft)"], ["email", "✉", "Emails to send", "var(--warn)", "var(--warn-soft)"], ["ops", "⚙", "Pipeline & data", "var(--primary)", "var(--primary-soft)"]];
+// ---------------------------------------------------------------- MY DAY (the caller's Today: a work screen. Pick a lead, call, log in one click, move to the next)
+const MD = { sel: null, camp: "" };
+const greet = () => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; };
+const QUICK = [["No Answer", "No answer", "no"], ["Voicemail", "Voicemail", "no"], ["Busy", "Busy", "no"], ["Connected", "Connected", "ok"], ["Interested", "Interested", "ok"], ["Not Interested", "Not interested", "no"], ["Wrong Number", "Wrong number", "no"]];
+const MD_GROUPS = [["callbacks", "Callbacks due"], ["followups", "Follow-ups due"], ["new", "New leads"], ["other", "Other assigned leads"]];
+const mdPoints = b => (b || "").split("\n").filter(Boolean).slice(1).map(ln => { const i = ln.indexOf(":"); return i > 0 && i < 24 ? `<li><b>${esc(ln.slice(0, i + 1))}</b>${esc(ln.slice(i + 1))}</li>` : `<li>${esc(ln)}</li>`; }).join("");
+PAGES.myday = async v => {
+  const d = await api("/today/mine"), t = d.tiles, w = d.week; if (MD.camp && !d.items.some(x => (x.lead.campaign_id || "none") === MD.camp)) MD.camp = "";
+  const items = MD.camp ? d.items.filter(x => (x.lead.campaign_id || "none") === MD.camp) : d.items, cids = [...new Set(d.items.map(x => x.lead.campaign_id || "none"))];
+  if (!items.find(x => x.lead.id === MD.sel)) MD.sel = items[0]?.lead.id || null;
+  const total = t.done_today + t.to_call, pct = total ? Math.round(100 * t.done_today / total) : 0, first = esc((S.me.name || "").split(" ")[0]);
+  const qi = x => { const l = x.lead; return `<div class="cx-i ${l.id === MD.sel ? "on" : ""}" data-id="${esc(l.id)}" tabindex="0" role="button"><div style="min-width:0"><div class="n">${esc(l.full_name)}</div><div class="s">${esc(l.title)}${l.title && l.company ? " · " : ""}${esc(l.company)}</div><div class="r ${x.overdue ? "bad" : ""}">${esc(x.reason)}${x.due_at ? " · " + fdate(x.due_at) : ""}</div><div class="cx-cp">${esc(campOf(l.campaign_id).name)}</div></div><div class="cx-rf" title="Fit score">${x.fit}<span>fit</span></div></div>`; };
+  const list = MD_GROUPS.map(([g, title]) => { const xs = items.filter(x => x.group === g); return xs.length ? `<div class="cx-qh"><span>${title}</span><span>${xs.length}</span></div>${xs.map(qi).join("")}` : ""; }).join("") + (d.total > items.length ? `<div class="cx-qh"><span>Showing the first ${items.length} of ${d.total}</span></div>` : "");
+  v.innerHTML = `<div class="cx-head"><div><h1>${greet()}, ${first}</h1><p>${t.to_call ? `${t.to_call} to work today, best ones first.` : "Nothing due right now."} ${t.assigned} ${t.assigned === 1 ? "lead is" : "leads are"} assigned to you in total.</p></div>
+      <div class="cx-prog"><div class="t"><span>Today's progress</span><span><b>${t.done_today}</b> logged · ${t.to_call} to go</span></div><div class="cx-bar"><i style="width:${pct}%"></i></div></div></div>
+    <div class="cx-chips"><span class="cx-chip"><b>${t.assigned}</b> assigned to you</span><span class="cx-chip"><b>${t.callbacks}</b> callbacks due</span><span class="cx-chip"><b>${t.followups}</b> follow-ups</span><span class="cx-chip"><b>${t.new}</b> new leads</span><span class="cx-chip"><b>${t.connected_today}</b> connected today</span><span class="cx-chip"><b>${w.calls}</b> calls this week</span><span class="cx-chip"><b>${w.meetings}</b> meetings this week</span></div>` +
+    (items.length ? `<div class="cx"><section class="card cx-q" aria-label="Your list">${cids.length > 1 ? `<div class="cx-qh"><select id="cxCamp" aria-label="Campaign">${opts(cids.map(id => [id, `${campOf(id === "none" ? null : id).name} (${d.items.filter(x => (x.lead.campaign_id || "none") === id).length})`]), MD.camp, "All campaigns")}</select></div>` : ""}${list}</section><section class="card cx-c" id="cxr" aria-live="polite"></section></div>` : `<div class="card cx-done"><div class="big">📭</div><h2>Nothing assigned to you yet</h2><p class="muted">Leads appear here the moment your manager assigns them to you.</p></div>`);
+  if (!items.length) return;
+  const cur = () => items.find(x => x.lead.id === MD.sel), idx = () => items.findIndex(x => x.lead.id === MD.sel);
+  const next = () => (items[idx() + 1] || items[idx() - 1])?.lead.id || null;
+  const draw = () => {
+    const x = cur(), l = x.lead, box = $("#cxr");
+    box.innerHTML = `<div class="cx-top"><div style="min-width:0"><h2>${esc(l.full_name)}</h2><div class="muted">${esc(l.title)}${l.title && l.company ? " at " : ""}${esc(l.company)}</div><div class="bar" style="margin:8px 0 0">${pill(l.stage)} ${(l.channels || []).map(chBadge).join(" ")}</div></div>
+        <div class="cx-score" title="${esc(x.fit_why.map(f => `+${f.points} ${f.label}`).join("\n"))}"><b>${x.fit}</b><span>fit score</span></div></div>
+      ${l.phone ? `<div class="cx-callrow"><a class="cx-call" href="tel:${esc(l.phone)}">☎ ${esc(l.phone)}</a><button class="btn" id="cxCopy">Copy number</button>${l.linkedin_url ? `<a class="btn" href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">LinkedIn</a>` : ""}${l.email ? `<a class="btn" href="mailto:${esc(l.email)}">Email</a>` : ""}</div>` : `<div class="cx-nophone"><b>No phone number for this lead.</b> ${can("enrich") ? '<button class="btn sm" id="cxEnr">Find it with Apollo</button>' : ""}${l.linkedin_url ? ` <a class="btn sm" href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">LinkedIn</a>` : ""}</div>`}
+      <div class="cx-why ${x.overdue ? "bad" : ""}">${esc(x.reason)}${x.due_at ? " · " + fdate(x.due_at) : ""}</div>
+      ${l.signal ? `<div class="cx-sig"><span>Why call now</span><b>${esc(l.signal)}</b>${l.signal_url && /^https?:/.test(l.signal_url) ? ` <a href="${esc(l.signal_url)}" target="_blank" rel="noopener noreferrer">source</a>` : ""}</div>` : ""}
+      ${l.campaign_id ? `<div class="muted" style="margin-bottom:6px">Campaign: <b>${esc(campOf(l.campaign_id).name)}</b></div>` : ""}
+      ${x.brief ? `<h3>Talking points</h3><ul class="cx-pts">${mdPoints(x.brief)}</ul>` : ""}
+      ${x.recent && x.recent.length ? `<h3>Recent history</h3><ul class="cx-pts">${x.recent.map(a => `<li><b>${esc(a.type.replace("_", " "))}: ${esc(a.outcome)}</b> <span class="muted">${fdate(a.at)}</span>${a.notes ? `<div class="muted" style="white-space:pre-wrap">${esc(a.notes)}</div>` : ""}</li>`).join("")}</ul>` : ""}
+      <h3>How did it go?</h3><input id="cxn" class="cx-note" placeholder="Add a note (optional), then pick an outcome" aria-label="Note">
+      <div class="cx-oc">${QUICK.map(([o, lb, tone]) => `<button class="btn ${tone}" data-oc="${esc(o)}">${lb}</button>`).join("")}<button class="btn" id="cxMore">More options…</button></div>
+      <div class="cx-foot"><button class="btn sm" id="cxSkip">Skip to next</button><button class="btn sm" id="cxOpen">Open full profile</button></div>`;
+    if ($("#cxCopy")) $("#cxCopy").onclick = () => { navigator.clipboard?.writeText(l.phone); toast("Number copied"); };
+    if ($("#cxEnr")) $("#cxEnr").onclick = () => enrichConfirm([l.id]);
+    $("#cxOpen").onclick = () => openLead(l.id);
+    $("#cxSkip").onclick = () => { MD.sel = items[(idx() + 1) % items.length].lead.id; $$(".cx-i", v).forEach(r => r.classList.toggle("on", r.dataset.id === MD.sel)); draw(); };
+    $("#cxMore").onclick = () => logActivityModal(l, () => { MD.sel = next(); PAGES.myday(v); }, "phone_call");
+    $$("[data-oc]", box).forEach(b => b.onclick = async () => {
+      const o = b.dataset.oc, note = $("#cxn").value.trim(); $$(".cx-oc .btn", box).forEach(z => z.disabled = true);
+      try {
+        const r = await api("/activities", { method: "POST", body: { lead_id: l.id, type: "phone_call", outcome: o, notes: note } }); toast(`${o} logged for ${l.full_name}`);
+        if (r.suggested_stage && can("leads:write") && await confirmBox("Move stage?", `Outcome "${o}" suggests moving ${l.full_name} from ${r.lead.stage} to ${r.suggested_stage}. Nothing changes unless you confirm.`, `Move to ${r.suggested_stage}`)) await moveStage(l.id, r.suggested_stage);
+        MD.sel = next(); PAGES.myday(v);
+      } catch (er) { toast(er.message, true); $$(".cx-oc .btn", box).forEach(z => z.disabled = false); }
+    });
+  };
+  if ($("#cxCamp")) $("#cxCamp").onchange = e => { MD.camp = e.target.value; PAGES.myday(v); };
+  $$(".cx-i", v).forEach(r => { const pick = () => { MD.sel = r.dataset.id; $$(".cx-i", v).forEach(z => z.classList.toggle("on", z === r)); draw(); }; r.onclick = pick; r.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } }; });
+  draw();
+};
+
 const T = { ch: "", owner: "", open: {}, more: {} };
 PAGES.today = async v => {
+  if (S.me.role === "caller") return PAGES.myday(v);          // callers get their own call list, not the approval queue
   const d = await api("/today"); const st = d.status; let all = d.suggestions;
   if (T.owner) all = all.filter(x => (x.owner_id || "__team") === T.owner);
   const n = c => all.filter(x => x.channel === c).length; const shown = T.ch ? all.filter(x => x.channel === T.ch) : all;
@@ -151,12 +224,12 @@ PAGES.today = async v => {
   const owners = [...new Set(d.suggestions.map(x => x.owner_id || "__team"))];
   const groups = ["call", "linkedin", "email", "ops"].map(c => ({ c, items: shown.filter(x => x.channel === c) })).filter(g => g.items.length);
   const item = x => `<div class="sg ${x.id === S.todaySel ? "on" : ""}" data-id="${x.id}"><div class="r"><span class="t">${esc(x.title)}</span>${x.kind !== "digest" ? `<span class="${scCls(x.priority)}" title="Priority score">${x.priority}</span>` : ""}</div><div class="m">${agTag(x.agent)} ${esc(x.lead ? campOf(x.lead.campaign_id).name : "Team")}${x.owner_id ? " · " + esc(uname(x.owner_id)) : ""}</div></div>`;
-  v.innerHTML = head("Today", "Suggestions prepared for each channel. Nothing changes until you approve it.", `<div class="runbar"><span>Last run ${ago(st.last_run)}${st.last_by ? " by " + esc(st.last_by) : ""} · next ${fdate(st.next_run)} (${st.hours.map(hh).join(", ")})</span><span class="pill ${st.provider.demo ? "s2" : "s7"}" title="${esc(st.provider.note || "")}">Signals: ${esc(st.provider.label)}</span>${can("agents:run") ? '<button class="btn primary sm" id="runNow">Run now</button>' : ""}</div>`) +
+  v.innerHTML = head("Today", "Suggestions prepared for each channel. Nothing changes until you approve it.", `<div class="runbar"><span>Last run ${ago(st.last_run)}${st.last_by ? " by " + esc(st.last_by) : ""} · next ${fdate(st.next_run)} (${st.hours.map(hh).join(", ")})</span>${can("agents:run") ? '<button class="btn primary sm" id="runNow">Run now</button>' : ""}</div>`) +
     `<div class="tiles">${TILES.map(([c, ic, l, col, bg]) => `<div class="tile ${T.ch === c ? "on" : ""}" data-ch="${c}"><span class="ic" style="background:${bg};color:${col}">${ic}</span><div><div class="v">${n(c)}</div><div class="l">${l}</div></div></div>`).join("")}</div>
     <div class="cc"><section class="card"><div class="ch"><h2>Waiting for approval <span class="muted">${shown.length}</span></h2>${S.me.role !== "caller" && owners.length > 1 ? `<select id="tow" aria-label="Filter by person" style="max-width:130px"><option value="">Everyone</option>${owners.map(o => `<option value="${o}" ${T.owner === o ? "selected" : ""}>${o === "__team" ? "Team items" : esc(uname(o))}</option>`).join("")}</select>` : ""}</div>
       <div class="scroll">${groups.length ? groups.map(g => { const open = T.open[g.c] !== false, lim = T.more[g.c] ? 99 : 5; return `<div class="sgg"><div class="sgg-h" data-g="${g.c}"><span>${open ? "▾" : "▸"} ${esc(CH[g.c][1])}</span><span>${g.items.length}</span></div>${open ? g.items.slice(0, lim).map(item).join("") + (g.items.length > lim ? `<button class="btn sm more" data-more="${g.c}">Show ${g.items.length - lim} more</button>` : "") : ""}</div>`; }).join("") : empty("Nothing waiting", can("agents:run") ? "Press Run now to look for suggestions." : "The next scheduled run will add suggestions.")}</div></section>
     <section id="ccm" class="scroll"></section>
-    <div style="gap:16px;display:flex;flex-direction:column"><div class="card"><h2>This week</h2>${[["Leads added", d.week.leads_added], ["Call attempts", d.week.calls], ["Meetings booked", d.week.meetings], ["Follow-ups completed", d.week.tasks_done], ["Signals found", d.week.signals_found], ["Approved / dismissed", `${d.week.approved} / ${d.week.dismissed}`]].map(([l, x]) => `<div class="wk"><span>${l}</span><b>${x}</b></div>`).join("")}</div>
+    <div style="gap:16px;display:flex;flex-direction:column"><div class="card"><h2>This week</h2>${[["Leads added", d.week.leads_added], ["Call attempts", d.week.calls], ["Meetings booked", d.week.meetings], ["Follow-ups completed", d.week.tasks_done], ["Leads with a signal", d.week.leads_with_signal], ["Approved / dismissed", `${d.week.approved} / ${d.week.dismissed}`]].map(([l, x]) => `<div class="wk"><span>${l}</span><b>${x}</b></div>`).join("")}</div>
     <div class="card feed" style="flex:1;min-height:0;display:flex;flex-direction:column"><h2>Activity</h2><div class="scroll">${d.feed.length ? d.feed.map(e => `<div class="e">${agTag(e.agent)}<span>${esc(e.text)}</span><span class="muted">${ago(e.at)}</span></div>`).join("") : empty("No activity yet")}</div></div></div></div>
     <div class="card" style="margin-top:16px"><div class="ch"><h2>Pipeline</h2><span class="muted">Select a stage to open those leads</span></div><div class="lanes">${(() => { const mx = Math.max(1, ...d.lanes.map(x => x.count)); return d.lanes.map(x => `<div class="lane" data-s="${esc(x.stage)}"><span class="muted" style="font-size:12px">${esc(x.stage)}</span><b>${x.count}</b><i style="width:${Math.round(100 * x.count / mx)}%;background:${stageHex(x.stage)}"></i></div>`).join(""); })()}</div></div>`;
   $$(".tile", v).forEach(e => e.onclick = () => { T.ch = T.ch === e.dataset.ch ? "" : e.dataset.ch; PAGES.today(v); });
@@ -172,7 +245,7 @@ PAGES.today = async v => {
     <div class="bar" style="margin:8px 0">${chBadge(x.channel)} <span class="chb mixed" style="--x:0">${esc(cm.name)}</span></div>
     <dl class="kv">${dd("Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>` : "")}${dd("Email", esc(l.email))}${dd("LinkedIn", l.linkedin_url ? `<a href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">Open profile</a>` : "")}${dd("Owner", esc(uname(l.owner_id)))}${dd("Touches", l.touches || 0)}${dd("Last touch", x.recent.length ? esc(x.recent[0].outcome) + " · " + fdate(x.recent[0].at) : "")}</dl>
     <h3 style="margin-top:12px">Why this is here</h3><ul style="margin:6px 0;padding-left:18px">${x.evidence.filter(e => !e.source).map(e => `<li>${esc(e.text)}</li>`).join("")}</ul>
-    ${x.signals.length ? `<h3>Signals</h3>${x.signals.map(s => `<div class="sig"><b>${esc(s.summary)}</b><div class="m">${s.demo ? "Demo signal, not real" : `Unverified web result · ${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">source</a>` : ""}${s.date ? " · " + esc(s.date) : ""} · check before you quote it`}</div></div>`).join("")}` : ""}
+    ${l.signal ? `<h3>Signal</h3><div class="sig"><b>${esc(l.signal)}</b>${l.signal_url && /^https?:/.test(l.signal_url) ? `<div class="m"><a href="${esc(l.signal_url)}" target="_blank" rel="noopener noreferrer">source</a></div>` : ""}</div>` : ""}
     <div class="bar" style="margin:10px 0 0"><button class="btn sm" id="ol">Open lead</button></div></div>` : "";
   const lbl = isDraft ? `${CH[x.channel][1]} draft` : "Proposed";
   m.innerHTML = x.kind === "digest" ? `<div class="card"><div class="ch"><h2>${agTag(x.agent)} ${esc(x.title)}</h2></div><p style="white-space:pre-wrap">${esc(x.body)}</p><div style="text-align:right"><button class="btn" id="dm">Mark as read</button></div></div>` :
@@ -226,7 +299,7 @@ const gcol = () => JSON.parse(localStorage.gcollapsed || "{}");
 const GB = {}; let SEL = new Set();
 const lvQuery = x => qs({ q: LV.q, stage: LV.stage, source: LV.source, owner: LV.owner, status: LV.status, sort: LV.sort, desc: LV.desc, ...x });
 PAGES.leads = async v => {
-  v.innerHTML = head("Leads", "Every lead lives in a campaign. Expand a campaign to work its leads.", `${can("assign") ? '<button class="btn" id="addC">+ Campaign</button><button class="btn" id="syncC" title="Import your active Apollo sequences as campaigns, with their contacts as leads">Sync from Apollo</button>' : ""}${can("leads:write") ? '<button class="btn primary" id="addL">+ Add lead</button>' : ""}${can("export") ? '<button class="btn" id="expL">Export CSV</button>' : ""}`) +
+  v.innerHTML = head("Leads", "Every lead lives in a campaign. Expand a campaign to work its leads.", `${can("assign") ? '<button class="btn" id="addC">+ Campaign</button><button class="btn" id="syncC" title="Import your active Apollo sequences as campaigns, with their contacts as leads">Sync from Apollo</button>' : ""}${can("leads:write") ? '<button class="btn primary" id="addL">+ Add lead</button>' : ""}${can("enrich") ? '<button class="btn" id="enrAll" title="Enrich every lead that still has missing data, using Apollo">Enrich all</button>' : ""}${can("export") ? '<button class="btn" id="expL">Export CSV</button>' : ""}`) +
     `<div class="bar"><input id="lq" placeholder="Filter by name, company, email, phone" value="${esc(LV.q)}" style="min-width:230px" aria-label="Filter leads">
     <select id="lch" aria-label="Channel">${opts([["call", "Calls"], ["linkedin", "LinkedIn"], ["email", "Email"], ["mixed", "Multi-channel"]], LV.channel, "All channels")}</select><select id="lca" aria-label="Campaign">${campOpts(LV.campaign, "All campaigns")}</select>
     <select id="lst" aria-label="Stage">${opts(S.stages, LV.stage, "All stages")}</select><select id="lsr" aria-label="Source">${opts(S.sources, LV.source, "All sources")}</select>
@@ -245,11 +318,12 @@ PAGES.leads = async v => {
   $("#svv").onclick = async () => { const n = await promptBox("Save view", "View name", "Save"); if (!n) return; const a = savedViews(); a.push({ name: n, f: { q: LV.q, stage: LV.stage, source: LV.source, owner: LV.owner, status: LV.status, campaign: LV.campaign, channel: LV.channel } }); localStorage.savedViews = JSON.stringify(a); PAGES.leads(v); toast("View saved"); };
   $("#lsv").onchange = e => { if (e.target.value === "") return; Object.assign(LV, savedViews()[+e.target.value].f); PAGES.leads(v); };
   if ($("#addL")) $("#addL").onclick = () => leadForm(null, LV.campaign || null); if ($("#addC")) $("#addC").onclick = () => campaignModal(() => PAGES.leads(v));
+  if ($("#enrAll")) $("#enrAll").onclick = enrichAll;
   if ($("#syncC")) $("#syncC").onclick = async e => {
     const b = e.target; b.disabled = true; b.textContent = "Syncing from Apollo… (can take a minute)";
     try {
       const r = await api("/integrations/apollo/sync-campaigns", { method: "POST" }); const m = await api("/meta"); S.campaigns = m.campaigns;
-      toast(r.note || `Apollo: ${r.active} active of ${r.apollo_total} sequences (${r.created} new, ${r.updated} updated, ${r.archived} archived). Leads: ${r.leads_created} added, ${r.leads_duplicate} already in CRM${r.truncated ? ". Stopped at 10,000 contacts, run again" : ""}.`, !!r.note);
+      toast(r.note || `Apollo: ${r.active} active of ${r.apollo_total} sequences (${r.created} new, ${r.updated} updated, ${r.archived} archived). Leads: ${r.leads_created} added, ${r.leads_duplicate} already in CRM${r.truncated ? ". Stopped at 10,000 contacts, run again" : ""}.${r.emails ? (r.emails.error ? ` Emails not synced: ${r.emails.error}` : ` Emails: ${r.emails.sent} sent, ${r.emails.replies} replies, ${r.emails.bounces} bounces.`) : ""}`, !!r.note);
       PAGES.leads(v);
     } catch (er) { toast(er.message, true); b.disabled = false; b.textContent = "Sync from Apollo"; }
   };
@@ -321,11 +395,40 @@ async function moveStage(id, stage) {
   try { await api(`/leads/${id}/stage`, { method: "POST", body: { stage, reason } }); toast("Stage updated"); return true; } catch (e) { toast(e.message, true); return false; }
 }
 async function enrichConfirm(ids) {
-  if (!await confirmBox("Enrich with Apollo", `Enrich ${ids.length} lead(s)? This may consume provider credits. Existing and user-verified values are never overwritten.`, "Start enrichment")) return;
-  try { const j = await api("/enrichment/jobs", { method: "POST", body: { lead_ids: ids, confirm: true } }); toast("Enrichment started"); pollJob(j.id); } catch (e) { toast(e.message, true); }
+  if (!await confirmBox("Enrich with Apollo", `Enrich ${ids.length} lead(s)? Apollo charges credits only for people it matches. Existing and user-verified values are never overwritten.`, "Start enrichment")) return;
+  try { const j = await api("/enrichment/jobs", { method: "POST", body: { lead_ids: ids, confirm: true } }); jobProgress(j.id); } catch (e) { toast(e.message, true); }
 }
-async function pollJob(id) {
-  for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 800)); const j = await api("/enrichment/jobs/" + id); if (!["queued", "running"].includes(j.status)) { const c = s => j.items.filter(x => x.status === s).length; toast(`Enrichment ${j.status}: ${c("enriched")} enriched, ${c("no_match")} no match, ${c("error")} errors`, j.status === "failed"); if (S.openLead && !$("#drawer").classList.contains("hidden")) openLead(S.openLead, true); return; } }
+async function enrichAll() {
+  let pv; try { pv = await api("/enrichment/preview"); } catch (e) { return toast(e.message, true); }
+  if (!pv.configured) { modal(`<h2>Apollo is pending configuration</h2><p>${esc(pv.pending_note)}</p><div class="acts"><button class="btn primary" id="cn">OK</button></div>`); $("#cn").onclick = closeModal; return; }
+  if (pv.busy) return toast("An enrichment job is already running. Wait for it to finish.", true);
+  if (!pv.qualifying) return toast("No leads qualify: they are already enriched, have all their data, or have nothing Apollo could search on.");
+  const more = pv.remaining_after ? ` ${pv.remaining_after} more qualify and will need another run.` : "";
+  if (!await confirmBox("Enrich all contacts", `${pv.qualifying} lead(s) qualify. This run processes ${pv.will_run} of them in ${pv.api_calls} Apollo call(s) of up to ${pv.batch_size}.${more} ${pv.credit_note}`, `Enrich ${pv.will_run} leads`)) return;
+  try { const j = await api("/enrichment/jobs", { method: "POST", body: { all: true, confirm: true } }); jobProgress(j.id); } catch (e) { toast(e.message, true); }
+}
+const JSTAT = { pending: "Waiting", enriched: "Enriched", no_new_data: "Matched, nothing new", no_match: "No match", error: "Failed" };
+async function jobProgress(id) {
+  modal(`<h2>Enrichment</h2><div id="jp">${sk(3)}</div>`, { wide: true });
+  const draw = j => {
+    const c = s => j.items.filter(x => x.status === s).length, run = ["queued", "running"].includes(j.status), done = j.items.length - c("pending"), pct = Math.round(100 * done / Math.max(1, j.items.length));
+    const order = { error: 0, no_match: 1, enriched: 2, no_new_data: 3 }, rows = j.items.filter(x => x.status !== "pending").sort((x, y) => order[x.status] - order[y.status]).slice(0, 300);
+    $("#jp").innerHTML = `<p>${run ? (j.status === "queued" ? "Starting…" : "Working. You can close this window; the job keeps running.") : `Finished: ${esc(j.status)}.`}${j.error ? ` <span class="bad">${esc(j.error)}</span>` : ""}</p>
+      <div class="jp-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
+      <p class="muted">${done} of ${j.items.length} processed · ${c("enriched")} enriched · ${c("no_new_data")} nothing new · ${c("no_match")} no match · ${c("error")} failed · Apollo credits used: ${j.credits_used ?? 0}</p>
+      ${rows.length ? `<div class="tbl-wrap" style="max-height:260px"><table class="tbl"><thead><tr><th>Lead</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rows.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(JSTAT[x.status] || x.status)}</td><td>${esc(x.error || x.note || (x.updated || []).join(", ") || "")}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      <div class="acts">${!run && (c("error") + c("no_match")) && can("enrich") ? '<button class="btn" id="jr">Retry failed / no match</button>' : ""}<button class="btn primary" id="jc">Close</button></div>`;
+    $("#jc").onclick = closeModal;
+    if ($("#jr")) $("#jr").onclick = async e => { e.target.disabled = true; try { const r = await api(`/enrichment/jobs/${id}/retry`, { method: "POST" }); jobProgress(r.id); } catch (er) { e.target.disabled = false; toast(er.message, true); } };
+    return run;
+  };
+  let fails = 0;
+  for (let i = 0; i < 1800; i++) {
+    let j; try { j = await api("/enrichment/jobs/" + id); fails = 0; } catch (e) { if (!$("#jp")) return; if (++fails >= 5) { $("#jp").innerHTML = `${empty("Lost contact with the server", e.message)}<div class="acts"><button class="btn primary" id="jc">Close</button></div>`; $("#jc").onclick = closeModal; return; } await new Promise(r => setTimeout(r, 2000)); continue; }
+    if (!$("#jp")) return;                                  // dialog closed: stop polling (the job itself keeps running on the server)
+    if (!draw(j)) { if (S.openLead && !$("#drawer").classList.contains("hidden")) openLead(S.openLead, true); if (location.hash.startsWith("#/leads")) { try { loadLeads(); } catch { } } return; }
+    await new Promise(r => setTimeout(r, 2000));
+  }
 }
 
 // ---------------------------------------------------------------- lead form + profile
@@ -335,25 +438,28 @@ function leadForm(l, defCamp) {
     <label>Job title<input name="title" value="${esc(l?.title)}"></label><label>Company<input name="company" value="${esc(l?.company)}"></label>
     <label>Email<input name="email" type="email" value="${esc(l?.email)}"></label><label>Phone<input name="phone" value="${esc(l?.phone)}"></label>
     <label>LinkedIn URL<input name="linkedin_url" value="${esc(l?.linkedin_url)}"></label><label>Website<input name="website" value="${esc(l?.website)}"></label>
+    <label class="full">Signal (why now: hiring, funding, news, a referral...)<input name="signal" maxlength="240" value="${esc(l?.signal)}"></label><label class="full">Signal source URL (optional)<input name="signal_url" value="${esc(l?.signal_url)}"></label>
     <label>Location<input name="location" value="${esc(l?.location)}"></label><label>Country<input name="country" value="${esc(l?.country)}"></label><label>Campaign<select name="campaign_id">${campOpts(l ? l.campaign_id : defCamp, "No campaign")}</select></label>
     ${l ? "" : `<label>Source*<select name="source">${opts(S.sources, "Manual")}</select></label><label>Source details (URL, event, referrer)<input name="source_detail"></label>${can("assign") ? `<label class="full">Owner<select name="owner_id">${userOpts("", "Unassigned")}</select></label>` : ""}`}
+    <div class="full"><span class="muted">Channels</span><div class="bar" style="margin:4px 0 0">${CH_OPTS.map(([v, lb]) => `<label class="chk"><input type="checkbox" name="channels" value="${v}" ${(l?.channels || []).includes(v) ? "checked" : ""}> ${lb}</label>`).join("")}<span class="muted">none ticked = follow the campaign</span></div></div>
     <p class="err full" id="fe"></p><div class="acts full"><button type="button" class="btn" id="cn">Cancel</button><button class="btn primary">${l ? "Save changes" : "Add lead"}</button></div></form>`);
   $("#cn").onclick = closeModal;
   $("#lf").onsubmit = async e => {
-    e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); if (d.owner_id === "") d.owner_id = null;
+    e.preventDefault(); const d = Object.fromEntries(new FormData(e.target)); if (d.owner_id === "") d.owner_id = null; d.channels = new FormData(e.target).getAll("channels");
     try { const r = l ? await api("/leads/" + l.id, { method: "PATCH", body: d }) : await api("/leads", { method: "POST", body: d }); closeModal(); toast(l ? "Lead saved" : "Lead added"); route(); if (!l) openLead(r.id); else openLead(l.id, true); }
     catch (er) { $("#fe").textContent = er.message; }
   };
 }
+const emailTags = x => x.source === "apollo" ? ` ${tag("Apollo")}${x.clicked ? tag("clicked") : x.opened ? tag("opened") : ""}` : "";
 const dd = (k, v) => `<dt>${esc(k)}</dt><dd>${v || '<span class="muted">—</span>'}</dd>`;
 async function openLead(id, keep) {
   S.openLead = id; const d = $("#drawer"); d.classList.remove("hidden"); if (!keep) d.innerHTML = `<div class="db">${sk(8)}</div>`;
   let l, tl; try { [l, tl] = await Promise.all([api("/leads/" + id), api(`/leads/${id}/timeline`)]); } catch (e) { d.innerHTML = `<div class="db">${empty("Lead unavailable", e.message)}</div>`; return; }
   const tab = S.leadTab || "overview"; const w = can("leads:write");
-  const tli = tl.map(x => x.kind === "activity" ? `<li><b>${esc(x.type.replace("_", " "))}: ${esc(x.outcome)}</b> <span class="muted">by ${esc(x.user)} · ${fdate(x.at)}</span>${x.notes ? `<div>${esc(x.notes)}</div>` : ""}</li>` : x.kind === "task" ? `<li class="t"><b>Task: ${esc(x.title)}</b> <span class="muted">${esc(x.status)} · due ${fdate(x.due_at)} · ${esc(uname(x.owner_id))}</span></li>` : `<li class="s"><b>Stage: ${esc(x.stage)}</b> <span class="muted">${fdate(x.at)} by ${esc(uname(x.by))}${x.reason ? " · " + esc(x.reason) : ""}</span></li>`).join("");
+  const tli = tl.map(x => x.kind === "activity" ? `<li><b>${esc(x.type.replace("_", " "))}: ${esc(x.outcome)}</b> <span class="muted">by ${esc(x.user)} · ${fdate(x.at)}</span>${emailTags(x)}${x.notes ? `<div style="white-space:pre-wrap">${esc(x.notes)}</div>` : ""}</li>` : x.kind === "task" ? `<li class="t"><b>Task: ${esc(x.title)}</b> <span class="muted">${esc(x.status)} · due ${fdate(x.due_at)} · ${esc(uname(x.owner_id))}</span></li>` : `<li class="s"><b>Stage: ${esc(x.stage)}</b> <span class="muted">${fdate(x.at)} by ${esc(uname(x.by))}${x.reason ? " · " + esc(x.reason) : ""}</span></li>`).join("");
   const prov = Object.entries(l.provenance || {}).map(([f, p]) => `<tr><td>${esc(f)}</td><td>${esc(p.provider)}</td><td>${fdate(p.at)}</td><td>${esc(p.prev) || "—"}</td></tr>`).join("");
   const panes = {
-    overview: `<dl class="kv">${dd("Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>` : "")}${dd("Email", l.email ? `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>` : "")}${dd("LinkedIn", l.linkedin_url ? `<a href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(l.linkedin_url)}</a>` : "")}${dd("Website", esc(l.website))}${dd("Location", esc(l.location || l.country))}${dd("Source", esc(l.source) + (l.source_detail ? ` <span class="muted">(${esc(l.source_detail)})</span>` : ""))}${dd("Created", fday(l.created_at))}${dd("Import batch", esc(l.import_batch_id))}${dd("Owner", esc(uname(l.owner_id)))}${dd("Campaign", `<span class="chb ${campOf(l.campaign_id).channel}">${esc(campOf(l.campaign_id).name)}</span>`)}${dd("Touches", `${l.touches || 0} (${l.attempts || 0} calls)`)}${dd("Tags", (l.tags || []).map(esc).join(", "))}</dl>`,
+    overview: `<dl class="kv">${dd("Signal", l.signal ? esc(l.signal) + (l.signal_url && /^https?:/.test(l.signal_url) ? ` <a href="${esc(l.signal_url)}" target="_blank" rel="noopener noreferrer">source</a>` : "") : "")}${dd("Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>` : "")}${dd("Email", l.email ? `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>` : "")}${dd("LinkedIn", l.linkedin_url ? `<a href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(l.linkedin_url)}</a>` : "")}${dd("Website", esc(l.website))}${dd("Location", esc(l.location || l.country))}${dd("Source", esc(l.source) + (l.source_detail ? ` <span class="muted">(${esc(l.source_detail)})</span>` : ""))}${dd("Created", fday(l.created_at))}${dd("Import batch", esc(l.import_batch_id))}${dd("Owner", esc(uname(l.owner_id)))}${dd("Campaign", `<span class="chb ${campOf(l.campaign_id).channel}">${esc(campOf(l.campaign_id).name)}</span>`)}${dd("Channels", leadChannels(l).map(c => chBadge(c)).join(" ") || '<span class="muted">All / unspecified</span>')}${dd("Touches", `${l.touches || 0} (${l.attempts || 0} calls)`)}${dd("Tags", (l.tags || []).map(esc).join(", "))}</dl>`,
     timeline: tl.length ? `<ul class="tl">${tli}</ul>` : empty("No history yet", "Log an activity to start the timeline."),
     enrichment: `<p>Status: <b>${esc(l.enrichment_state.replace(/_/g, " "))}</b> · Last enriched: ${fdate(l.last_enriched_at)}</p>${prov ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Field</th><th>Provider</th><th>When</th><th>Previous value</th></tr></thead><tbody>${prov}</tbody></table></div>` : empty("No enriched fields yet")}<p class="muted">Verified by a person: ${(l.verified_fields || []).map(esc).join(", ") || "none"}. These are never overwritten by enrichment.</p>${can("enrich") ? '<button class="btn" id="enr">Enrich this lead</button>' : ""}`,
     opportunity: `<div id="opp">${sk(2)}</div>`
@@ -397,40 +503,53 @@ function logActivityModal(l, done, defType) {
 }
 
 // ---------------------------------------------------------------- LEAD DISCOVERY (A: sources, B: upload wizard)
-const FIELDS = [["", "Ignore column"], ["first_name", "First name"], ["last_name", "Last name"], ["email", "Email"], ["phone", "Phone"], ["company", "Company"], ["title", "Job title"], ["linkedin_url", "LinkedIn URL"], ["website", "Website"], ["location", "Location"], ["country", "Country"]];
+const FIELDS = [["", "Ignore column"], ["first_name", "First name"], ["last_name", "Last name"], ["email", "Email"], ["phone", "Phone"], ["company", "Company"], ["title", "Job title"], ["linkedin_url", "LinkedIn URL"], ["website", "Website"], ["location", "Location"], ["country", "Country"], ["signal", "Signal"], ["signal_url", "Signal URL"]];
 PAGES.discovery = async v => {
   const hist = await api("/imports");
   v.innerHTML = head("Lead Discovery", "Add leads from connected sources or upload a list.") + `<div class="grid g2">
-  <div class="card"><h2>A. Connected sources</h2><p class="muted">Search Apollo, add research leads, or bring in an official LinkedIn export.</p><div class="bar"><button class="btn primary" id="goA">Search Apollo</button><button class="btn" id="goM">Add research / manual lead</button></div>
+  <div class="card"><h2>A. Connected sources</h2><p class="muted">Search Apollo, retrieve a saved Apollo list, add research leads, or bring in an official LinkedIn export.</p><div class="bar"><button class="btn primary" id="goA">Search Apollo</button><button class="btn" id="goLists">Select saved Apollo lists</button><button class="btn" id="goM">Add research / manual lead</button></div>
   <p class="muted"><b>LinkedIn / Sales Navigator:</b> only official exports or approved CRM integrations. Upload the export in path B and choose source “LinkedIn”. No scraping.</p></div>
   <div class="card"><h2>B. Upload a lead list</h2><p class="muted">CSV or XLSX. Map columns, validate, resolve duplicates, then import.</p><button class="btn primary" id="goB">Upload file</button></div></div>
   <div id="work" style="margin-top:16px"></div>
   <div class="card" style="margin-top:16px"><h2>Import history</h2>${hist.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Source / file</th><th>By</th><th>Rows</th><th>Created</th><th>Updated</th><th>Skipped</th><th>Invalid</th><th>Status</th><th></th></tr></thead><tbody>${hist.map(b => `<tr><td>${fdate(b.at)}</td><td>${esc(b.file)}</td><td>${esc(b.by_name)}</td><td>${b.row_count}</td><td>${b.created}</td><td>${b.updated}</td><td>${b.skipped}</td><td>${b.invalid}</td><td>${esc(b.status.replace("_", " "))}</td><td>${b.status === "done" && b.created ? `<button class="btn sm" data-rb="${b.id}">Roll back</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : empty("No imports yet", "Your first import will show up here with row counts and a rollback option.")}</div>`;
   $("#goM").onclick = () => leadForm(); $("#goA").onclick = apolloUI; $("#goB").onclick = wizard;
+  $("#goLists").onclick = async e => {
+    const w = $("#work"); w.innerHTML = `<div class="card"><h2>Saved Apollo lists</h2>${sk(3)}</div>`;
+    e.target.disabled = true;
+    try { AS.lists = await api("/integrations/apollo/lists"); }
+    catch (er) { w.innerHTML = `<div class="card">${empty(er.code === "apollo_not_configured" ? "Apollo is pending configuration" : "Could not load Apollo lists", er.message)}</div>`; e.target.disabled = false; return; }
+    e.target.disabled = false;
+    const draw = () => { w.innerHTML = `<div class="card"><div class="ch"><h2>Saved Apollo lists</h2><button class="btn sm" id="reloadApolloLists">Reload lists</button></div><p class="muted">Select saved people lists to retrieve their contacts into the CRM. Each selected list becomes a Calls campaign.</p>${asListsHtml()}</div>`;
+      if ($("#alLoad")) $("#alLoad").remove();
+      if ($("#alSync")) $("#alSync").textContent = "Retrieve selected lists";
+      $("#reloadApolloLists").onclick = async b => { b.target.disabled = true; try { AS.lists = await api("/integrations/apollo/lists"); draw(); } catch (er) { toast(er.message, true); b.target.disabled = false; } };
+      if ($("#alSync")) $("#alSync").onclick = async b => { const ids = $$('[data-l]', w).filter(c => c.checked).map(c => c.dataset.l); if (!ids.length) return toast("Select at least one list", true); b.target.disabled = true; b.target.textContent = "Retrieving lists…"; try { const r = await api("/integrations/apollo/lists/sync", { method: "POST", body: { label_ids: ids } }); toast(`${r.lists} list(s) retrieved: ${r.leads_created} leads added, ${r.leads_duplicate} already in the CRM${r.truncated ? ". Stopped early, retrieve again" : ""}.`); await refreshCampaigns(); AS.lists = await api("/integrations/apollo/lists").catch(() => AS.lists); draw(); } catch (er) { toast(er.message, true); b.target.disabled = false; b.target.textContent = "Retrieve selected lists"; } };
+    }; draw();
+  };
   $$("[data-rb]").forEach(b => b.onclick = async () => { if (!await confirmBox("Roll back import", "Remove every lead created by this import? Blocked if any of them already has activity.", "Roll back", true)) return; try { await api(`/imports/${b.dataset.rb}/rollback`, { method: "POST" }); toast("Import rolled back"); PAGES.discovery(v); } catch (e) { toast(e.message, true); } });
 };
 function apolloUI() {
   const w = $("#work"); let res = [];
-  w.innerHTML = `<div class="card"><h2>Apollo search</h2><form id="as" class="bar"><select name="__c" id="apc" aria-label="Import into campaign">${campOpts("", "Import into: no campaign")}</select><input name="title" placeholder="Job title"><input name="company" placeholder="Company"><input name="location" placeholder="Location"><input name="keywords" placeholder="Keywords"><button class="btn primary">Search</button></form><div id="ar"></div></div>`;
+  w.innerHTML = `<div class="card"><h2>Apollo search</h2><form id="as" class="bar"><input name="title" placeholder="Job title"><input name="company" placeholder="Company or domain (comma separated)"><select name="seniority" aria-label="Seniority"><option value="">Any seniority</option>${["owner", "founder", "c_suite", "partner", "vp", "head", "director", "manager", "senior", "entry", "intern"].map(x => `<option value="${x}">${x.replace("_", " ")}</option>`).join("")}</select><input name="location" placeholder="Location"><input name="keywords" placeholder="Keywords"><button class="btn primary">Search</button></form>${targetHtml("apt")}<div id="ar"></div></div>`; bindTarget($("#apt"));
   let page = 1;
   const run = async () => {
     const f = Object.fromEntries(new FormData($("#as"))); delete f.__c; $("#ar").innerHTML = sk(5);
     try {
       const r = await api("/integrations/apollo/search", { method: "POST", body: { ...f, page } }); res = r.results;
       $("#ar").innerHTML = (r.note ? `<p class="warnc">${esc(r.note)}</p>` : "") + `<div class="tbl-wrap"><table class="tbl"><thead><tr><th></th><th>Name</th><th>Title</th><th>Company</th><th>Location</th><th>Email</th><th>Duplicate?</th></tr></thead><tbody>${res.map((x, i) => `<tr><td><input type="checkbox" class="ap" data-i="${i}" ${x.duplicate_of ? "" : "checked"} aria-label="Select ${esc(x.first_name)}"></td><td>${esc(x.first_name)} ${esc(x.last_name)}</td><td>${esc(x.title)}</td><td>${esc(x.company)}</td><td>${esc(x.location)}</td><td>${esc(x.email) || `<span class="muted">${x.has_email ? "available, enrich to reveal" : "needs enrichment"}</span>`}</td><td>${x.duplicate_of ? `<span class="warnc">Matches ${esc(x.duplicate_of)}</span>` : "New"}</td></tr>`).join("")}</tbody></table></div>
-      <div class="pager"><span><button class="btn sm" id="ap-p" ${page < 2 ? "disabled" : ""}>Previous page</button> <button class="btn sm" id="ap-n">Next page</button></span><button class="btn primary" id="ap-i">Import selected</button></div>`;
+      <div class="pager"><span><button class="btn sm" id="ap-p" ${page < 2 ? "disabled" : ""}>Previous page</button> <button class="btn sm" id="ap-n" ${r.has_more ? "" : "disabled"}>Next page</button> <span class="muted">Page ${page}${r.total != null ? ` · ${Number(r.total).toLocaleString()} people match` : ""}</span></span><button class="btn primary" id="ap-i">Import selected</button></div>`;
       $("#ap-p").onclick = () => { page--; run(); }; $("#ap-n").onclick = () => { page++; run(); };
-      $("#ap-i").onclick = async () => { const sel = $$(".ap").filter(c => c.checked).map(c => res[+c.dataset.i]); if (!sel.length) return toast("Select at least one result", true); try { const b = await api("/integrations/apollo/import", { method: "POST", body: { records: sel, campaign_id: $("#apc").value || null } }); toast(`Imported ${b.created}, skipped ${b.skipped} duplicates`); route(); } catch (e) { toast(e.message, true); } };
-    } catch (e) { $("#ar").innerHTML = empty("Search failed", e.message); }
+      $("#ap-i").onclick = async () => { const sel = $$(".ap").filter(c => c.checked).map(c => res[+c.dataset.i]); if (!sel.length) return toast("Select at least one result", true); try { const b = await api("/integrations/apollo/import", { method: "POST", body: { records: sel, ...readTarget($("#apt")) } }); toast(`Imported ${b.created}, skipped ${b.skipped} duplicates`); await refreshCampaigns(); route(); } catch (e) { toast(e.message, true); } };
+    } catch (e) { $("#ar").innerHTML = e.code === "apollo_not_configured" ? empty("Apollo is pending configuration", e.message) : empty("Search failed", e.message); }
   };
   $("#as").onsubmit = e => { e.preventDefault(); page = 1; run(); };
 }
 function wizard() {
   const w = $("#work"); const st = { b: null, map: {}, policy: "skip", source: "File Upload", pv: null }; const names = ["Upload", "Map fields", "Preview & validate", "Duplicates", "Confirm"];
   const steps = n => `<div class="steps">${names.map((x, i) => `<span class="step ${i === n ? "on" : i < n ? "done" : ""}">${i + 1}. ${x}</span>`).join("")}</div>`;
-  const s0 = () => { w.innerHTML = `<div class="card"><h2>Upload a lead list</h2>${steps(0)}<label>CSV or XLSX file (max 5 MB, 5,000 rows)<input type="file" id="fi" accept=".csv,.xlsx"></label><div class="bar" style="margin-top:10px"><label style="min-width:220px">Source label<select id="fs">${opts(S.sources, "File Upload")}</select></label><label style="min-width:260px">Import into campaign<select id="fc">${campOpts("", "No campaign")}</select></label></div><p class="err" id="fe"></p></div>`; $("#fi").onchange = async e => { const f = e.target.files[0]; if (!f) return; if (!/\.(csv|xlsx)$/i.test(f.name)) { $("#fe").textContent = "Only .csv and .xlsx files are supported."; return; } st.source = $("#fs").value; st.campaign = $("#fc").value || null; const fd = new FormData(); fd.append("file", f); try { st.b = await api("/imports/upload", { method: "POST", form: fd }); st.map = { ...st.b.suggested_mapping }; s1(); } catch (er) { $("#fe").textContent = er.message; } }; };
+  const s0 = () => { w.innerHTML = `<div class="card"><h2>Upload a lead list</h2>${steps(0)}${targetHtml("wt")}<div class="bar" style="margin-top:10px"><label style="min-width:220px">Source label<select id="fs">${opts(S.sources, "File Upload")}</select></label></div><label style="margin-top:10px">CSV or XLSX file (max 5 MB, 5,000 rows). Choose the channels and campaign above first.<input type="file" id="fi" accept=".csv,.xlsx"></label><p class="err" id="fe"></p></div>`; bindTarget($("#wt")); $("#fi").onchange = async e => { const f = e.target.files[0]; if (!f) return; if (!/\.(csv|xlsx)$/i.test(f.name)) { $("#fe").textContent = "Only .csv and .xlsx files are supported."; return; } st.source = $("#fs").value; try { st.target = readTarget($("#wt")); } catch (er) { $("#fe").textContent = er.message; e.target.value = ""; return; } const fd = new FormData(); fd.append("file", f); try { st.b = await api("/imports/upload", { method: "POST", form: fd }); st.map = { ...st.b.suggested_mapping }; s1(); } catch (er) { $("#fe").textContent = er.message; } }; };
   const s1 = () => { const b = st.b; w.innerHTML = `<div class="card"><h2>Map columns</h2>${steps(1)}<p class="muted">${b.row_count} rows found in ${esc(b.file)}. We guessed the mapping; check it.</p><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Column in file</th><th>Sample</th><th>Maps to</th></tr></thead><tbody>${b.columns.map((c, i) => `<tr><td><b>${esc(c)}</b></td><td>${esc(b.sample[0]?.[c])}</td><td><select data-c="${i}">${opts(FIELDS, st.map[c] || "")}</select></td></tr>`).join("")}</tbody></table></div><div class="acts" style="margin-top:12px"><button class="btn" id="bk">Back</button><button class="btn primary" id="nx">Validate</button></div></div>`; $$("[data-c]").forEach(s => s.onchange = () => { st.map[b.columns[+s.dataset.c]] = s.value; }); $("#bk").onclick = s0; $("#nx").onclick = s2; };
-  const body = () => ({ mapping: st.map, policy: st.policy, source: st.source, campaign_id: st.campaign || null, confirm_separate: !!st.cs });
+  const body = () => ({ mapping: st.map, policy: st.policy, source: st.source, ...st.target, confirm_separate: !!st.cs });
   const s2 = async () => { w.innerHTML = `<div class="card">${steps(2)}${sk(5)}</div>`; try { st.pv = await api(`/imports/${st.b.id}/preview`, { method: "POST", body: body() }); } catch (e) { toast(e.message, true); return s1(); }
     const p = st.pv; w.innerHTML = `<div class="card"><h2>Preview & validation</h2>${steps(2)}<div class="grid g3"><div class="card kpi"><span class="l">Valid new leads</span><span class="v ok">${p.valid_new}</span></div><div class="card kpi"><span class="l">Possible duplicates</span><span class="v warnc">${p.duplicate_count}</span></div><div class="card kpi"><span class="l">Rows with errors</span><span class="v bad">${p.error_count}</span></div></div>
     ${p.error_count ? `<h3 style="margin-top:14px">Row errors</h3><div class="tbl-wrap" style="max-height:240px"><table class="tbl"><thead><tr><th>Row</th><th>Problem</th><th>Data</th></tr></thead><tbody>${p.errors.slice(0, 50).map(e => `<tr><td>${e.row}</td><td class="bad">${esc(e.errors.join("; "))}</td><td>${esc(Object.values(e.data).join(", "))}</td></tr>`).join("")}</tbody></table></div><button class="btn sm" id="er" style="margin-top:8px">Download error report</button>` : ""}
@@ -442,18 +561,18 @@ function wizard() {
     <div class="acts" style="margin-top:12px"><button class="btn" id="bk">Back</button><button class="btn primary" id="nx">Review & confirm</button></div></div>`;
     $$("[name=pol]").forEach(r => r.onchange = () => { st.policy = r.value; }); $("#bk").onclick = s2; $("#nx").onclick = s4; };
   const s4 = async () => { const p = st.pv; if (st.policy === "separate" && p.duplicate_count && !await confirmBox("Create duplicate records?", `${p.duplicate_count} rows match existing leads. Importing them as separate records creates duplicates.`, "Yes, import separately", true)) return; st.cs = true;
-    w.innerHTML = `<div class="card"><h2>Confirm import</h2>${steps(4)}<p>Source <b>${esc(st.source)}</b> · policy <b>${esc(st.policy)}</b>. New leads: <b>${p.valid_new}</b>${st.policy === "separate" ? " + " + p.duplicate_count + " separate" : ""}. Invalid rows (<b>${p.error_count}</b>) are not imported and stay in the error report.</p><div class="acts"><button class="btn" id="bk">Back</button><button class="btn primary" id="go">Import leads</button></div></div>`; $("#bk").onclick = s3;
-    $("#go").onclick = async e => { e.target.disabled = true; try { const b = await api(`/imports/${st.b.id}/confirm`, { method: "POST", body: body() }); toast(`Imported ${b.created} new · ${b.updated} updated · ${b.skipped} skipped`); route(); } catch (er) { e.target.disabled = false; toast(er.message, true); } }; };
+    w.innerHTML = `<div class="card"><h2>Confirm import</h2>${steps(4)}<p>Source <b>${esc(st.source)}</b> · channels <b>${esc(st.target.channels.join(" + "))}</b> · policy <b>${esc(st.policy)}</b>. New leads: <b>${p.valid_new}</b>${st.policy === "separate" ? " + " + p.duplicate_count + " separate" : ""}. Invalid rows (<b>${p.error_count}</b>) are not imported and stay in the error report.</p><div class="acts"><button class="btn" id="bk">Back</button><button class="btn primary" id="go">Import leads</button></div></div>`; $("#bk").onclick = s3;
+    $("#go").onclick = async e => { e.target.disabled = true; try { const b = await api(`/imports/${st.b.id}/confirm`, { method: "POST", body: body() }); toast(`Imported ${b.created} new · ${b.updated} updated · ${b.skipped} skipped`); await refreshCampaigns(); route(); } catch (er) { e.target.disabled = false; toast(er.message, true); } }; };
   s0();
 }
 
 // ---------------------------------------------------------------- SALES ACTIVITY (daily queue grouped by campaign, per channel)
 const WS = { ch: "", q: "", open: {} };
 PAGES.workspace = async v => {
-  const all = await api("/workspace/queue"); const chOf = x => campOf(x.lead.campaign_id).channel;
-  let q = all.filter(x => (!WS.ch || chOf(x) === WS.ch) && (!WS.q || (x.lead.full_name + x.lead.company).toLowerCase().includes(WS.q.toLowerCase())));
+  const all = await api("/workspace/queue"); const chsOf = x => leadChannels(x.lead);
+  let q = all.filter(x => (!WS.ch || chsOf(x).includes(WS.ch)) && (!WS.q || (x.lead.full_name + x.lead.company).toLowerCase().includes(WS.q.toLowerCase())));
   if (!q.find(x => x.lead.id === S.wsLead)) S.wsLead = q[0]?.lead.id;
-  const cnt = c => all.filter(x => !c || chOf(x) === c).length;
+  const cnt = c => all.filter(x => !c || chsOf(x).includes(c)).length;
   const order = S.campaigns.map(c => c.id).concat("none"), groups = order.map(id => ({ c: campOf(id === "none" ? null : id), items: q.filter(x => (x.lead.campaign_id || "none") === id) })).filter(g => g.items.length);
   v.innerHTML = head("Sales Activity & Follow-up", "Work your queue channel by channel, then log what happened. Callbacks first, then overdue, then new leads.") +
     (!all.length ? `<div class="card">${empty("Queue is clear", "No callbacks, overdue tasks or untouched leads assigned to you.")}</div>` : `<div class="ws"><section class="card rail"><div class="seg" style="margin-bottom:10px;align-self:flex-start" role="group" aria-label="Channel">${[["", "All"], ["call", "Calls"], ["linkedin", "LinkedIn"], ["email", "Email"]].map(([c, l]) => `<button class="${WS.ch === c ? "on" : ""}" data-ch="${c}">${l} ${cnt(c)}</button>`).join("")}</div><input id="wq" placeholder="Search the queue" value="${esc(WS.q)}" style="margin-bottom:10px" aria-label="Search the queue">
@@ -464,14 +583,15 @@ PAGES.workspace = async v => {
   $$("[data-g]", v).forEach(h => h.onclick = () => { WS.open[h.dataset.g] = WS.open[h.dataset.g] === false; h.parentElement.classList.toggle("collapsed", WS.open[h.dataset.g] === false); });
   $$(".qi", v).forEach(e => e.onclick = () => { S.wsLead = e.dataset.id; PAGES.workspace(v); });
   const cur = q.find(x => x.lead.id === S.wsLead); if (!cur) { $("#qd").innerHTML = empty("Pick a lead", "Details appear here."); return; }
-  const l = cur.lead, cm = campOf(l.campaign_id), ch = cm.channel, idx = q.indexOf(cur), tl = await api(`/leads/${l.id}/timeline`);
+  const l = cur.lead, cm = campOf(l.campaign_id), chs = leadChannels(l), ch = WS.ch && chs.includes(WS.ch) ? WS.ch : chs.length === 1 ? chs[0] : "mixed", idx = q.indexOf(cur), tl = await api(`/leads/${l.id}/timeline`);
   const tile = (k, label, body, on) => `<div class="card" style="${on ? "border-color:var(--primary);background:var(--primary-soft)" : ""}"><div class="muted">${label}</div><b style="font-size:${on ? 17 : 14}px;word-break:break-all">${body}</b></div>`;
-  $("#qd").innerHTML = `<div class="ch"><div><h2 style="font-size:18px">${esc(l.full_name)}</h2><div class="muted">${esc(l.title)}${l.title && l.company ? " · " : ""}${esc(l.company)}</div><div class="bar" style="margin:8px 0 0">${chBadge(ch)} <span class="tag">${esc(cm.name)}</span></div></div>${pill(l.stage)}</div>
-  <div class="grid g3" style="margin:14px 0">${tile("p", "Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>` : "No phone, try enrichment", ch === "call" || ch === "mixed")}${tile("l", "LinkedIn", l.linkedin_url ? `<a href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">Open profile</a>` : "No profile URL", ch === "linkedin")}${tile("e", "Email", l.email ? `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>` : "No email", ch === "email")}</div>
+  $("#qd").innerHTML = `<div class="ch"><div><h2 style="font-size:18px">${esc(l.full_name)}</h2><div class="muted">${esc(l.title)}${l.title && l.company ? " · " : ""}${esc(l.company)}</div><div class="bar" style="margin:8px 0 0">${(chs.length ? chs : ["mixed"]).map(chBadge).join(" ")} <span class="tag">${esc(cm.name)}</span></div></div>${pill(l.stage)}</div>
+  <div class="grid g3" style="margin:14px 0">${tile("p", "Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a>` : "No phone, try enrichment", chs.includes("call") || !chs.length)}${tile("l", "LinkedIn", l.linkedin_url ? `<a href="${esc(l.linkedin_url)}" target="_blank" rel="noopener noreferrer">Open profile</a>` : "No profile URL", chs.includes("linkedin"))}${tile("e", "Email", l.email ? `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>` : "No email", chs.includes("email"))}</div>
   <div class="na"><div><b>Next action</b><div>${l.next_action ? esc(l.next_action) + " · " + fdate(l.next_action_due) : "None set"}</div></div><span class="muted">${l.touches || 0} touches · last ${fdate(l.last_activity_at)}</span></div>
-  <div class="bar"><button class="btn primary" id="wl">Log ${ch === "linkedin" ? "LinkedIn touch" : ch === "email" ? "email" : "activity"}</button><button class="btn" id="wsk">Skip to next</button><button class="btn" id="wo">Open full profile</button></div>
-  <h3>Recent history</h3>${tl.length ? `<ul class="tl">${tl.slice(0, 5).map(x => `<li><b>${esc(x.outcome || x.title || x.stage)}</b> <span class="muted">${esc((x.type || "").replace("_", " "))} ${fdate(x.at || x.created_at)}</span>${x.notes ? `<div>${esc(x.notes)}</div>` : ""}</li>`).join("")}</ul>` : empty("No history yet")}`;
-  $("#wl").onclick = () => logActivityModal(l, () => { S.wsLead = q[idx + 1]?.lead.id || null; PAGES.workspace(v); }); $("#wsk").onclick = () => { S.wsLead = q[(idx + 1) % q.length].lead.id; PAGES.workspace(v); }; $("#wo").onclick = () => openLead(l.id);
+  <div class="bar">${ch === "email" ? (can("assign") ? '<button class="btn primary" id="wse" title="Pull sends, replies and bounces from your Apollo sequences">Sync emails from Apollo</button>' : "") : `<button class="btn primary" id="wl">Log ${ch === "linkedin" ? "LinkedIn touch" : "activity"}</button>`}<button class="btn" id="wsk">Skip to next</button><button class="btn" id="wo">Open full profile</button></div>
+  ${ch === "email" ? '<p class="muted">Emails are sent from your Apollo sequences. Sends, replies and bounces appear here after a sync. Nothing about emails is logged by hand.</p>' : ""}<h3>Recent history</h3>${tl.length ? `<ul class="tl">${tl.slice(0, ch === "email" ? 10 : 5).map(x => `<li><b>${esc(x.outcome || x.title || x.stage)}</b> <span class="muted">${esc((x.type || "").replace("_", " "))} ${fdate(x.at || x.created_at)}</span>${emailTags(x)}${x.notes ? `<div style="white-space:pre-wrap">${esc(x.notes)}</div>` : ""}</li>`).join("")}</ul>` : empty("No history yet")}`;
+  if ($("#wl")) $("#wl").onclick = () => logActivityModal(l, () => { S.wsLead = q[idx + 1]?.lead.id || null; PAGES.workspace(v); });
+  if ($("#wse")) $("#wse").onclick = async e => { const b = e.target; b.disabled = true; b.textContent = "Syncing emails from Apollo…"; try { const r = await api("/integrations/apollo/sync-emails", { method: "POST" }); toast(`Apollo emails: ${r.sent} new sent, ${r.replies} replies, ${r.bounces} bounces${r.unmatched ? `, ${r.unmatched} not matched to a lead` : ""}${r.truncated ? ". Stopped early, run again" : ""}.`); PAGES.workspace(v); } catch (er) { toast(er.message, true); b.disabled = false; b.textContent = "Sync emails from Apollo"; } }; $("#wsk").onclick = () => { S.wsLead = q[(idx + 1) % q.length].lead.id; PAGES.workspace(v); }; $("#wo").onclick = () => openLead(l.id);
 };
 
 // ---------------------------------------------------------------- ACTIVITIES & FOLLOW-UPS
@@ -552,17 +672,89 @@ function story(b, d) {
 const SUGG = ["How many leads were added this week and from which sources?", "How many prospects were called, connected with and qualified?", "Which leads are due for a callback today?", "Which salesperson has the largest overdue queue?", "Which source has the strongest connection rate?", "Where is the biggest pipeline drop-off?", "What changed compared with the previous period?", "How many enrichment requests succeeded or failed?"];
 const CHAT = [];
 function mountChat(el, ctxLead) {
-  const draw = () => { $(".msgs", el).innerHTML = CHAT.length ? CHAT.map(m => m.u ? `<div class="msg u">${esc(m.u)}</div>` : `<div class="msg a">${esc(m.a.answer)}${m.a.records?.length ? `<ul>${m.a.records.map(r => `<li><a href="#" data-l="${esc(r.id)}">${esc(r.name)}</a>${r.detail ? " · " + esc(r.detail) : ""}</li>`).join("")}</ul>` : ""}${m.a.proposed_action ? `<div class="na"><span>${esc(m.a.proposed_action.label)}</span><button class="btn sm primary" data-act="${m.a.proposed_action.id}">Confirm</button></div>` : ""}${m.a.period || m.a.definition ? `<div class="meta"><b>${m.a.kind === "fact" ? "Fact from CRM data" : ""}</b> ${m.a.period ? "· Period: " + esc(m.a.period) : ""}${m.a.definition ? "<br>Definition: " + esc(m.a.definition) : ""}</div>` : ""}</div>`).join("") : `<div class="muted">Ask about your CRM data. I only read what your role can see, and I never change records without your confirmation.</div><div class="chips">${SUGG.map(s => `<span class="chip">${esc(s)}</span>`).join("")}</div>`;
+  const draw = () => { $(".msgs", el).innerHTML = CHAT.length ? CHAT.map(m => m.u ? `<div class="msg u">${esc(m.u)}</div>` : `<div class="msg a">${esc(m.a.answer)}${m.a.records?.length ? `<ul>${m.a.records.map(r => `<li><a href="#" data-l="${esc(r.id)}">${esc(r.name)}</a>${r.detail ? " · " + esc(r.detail) : ""}</li>`).join("")}</ul>` : ""}${m.a.ai_phrased ? '<div class="meta"><b>AI-written</b> from CRM facts. Review before using.</div>' : ""}${m.a.proposed_action ? `<div class="na"><span>${esc(m.a.proposed_action.label)}</span><button class="btn sm primary" data-act="${m.a.proposed_action.id}">Confirm</button></div>` : ""}${m.a.period || m.a.definition ? `<div class="meta"><b>${m.a.kind === "fact" ? "Fact from CRM data" : ""}</b> ${m.a.period ? "· Period: " + esc(m.a.period) : ""}${m.a.definition ? "<br>Definition: " + esc(m.a.definition) : ""}</div>` : ""}</div>`).join("") : `<div class="muted">Ask about your CRM data. I only read what your role can see, and I never change records without your confirmation.</div><div class="chips">${(ctxLead ? LEAD_SUGG : SUGG).map(s => `<span class="chip">${esc(s)}</span>`).join("")}</div>`;
     const m = $(".msgs", el); m.scrollTop = m.scrollHeight;
     $$(".chip", el).forEach(c => c.onclick = () => send(c.textContent)); $$("[data-l]", el).forEach(a => a.onclick = e => { e.preventDefault(); openLead(a.dataset.l); });
     $$("[data-act]", el).forEach(b => b.onclick = async () => { if (!await confirmBox("Confirm AI-suggested action", b.previousElementSibling.textContent + ". This will be recorded in the audit log.", "Confirm")) return; try { const r = await api(`/ai/actions/${b.dataset.act}/confirm`, { method: "POST" }); toast(`${r.created} tasks created`); b.disabled = true; } catch (e) { toast(e.message, true); } });
   };
   const send = async t => { t = (t || "").trim(); if (!t) return; CHAT.push({ u: t }); draw(); $("input", el).value = ""; try { CHAT.push({ a: await api("/ai/chat", { method: "POST", body: { message: t, lead_id: ctxLead || null } }) }); } catch (e) { CHAT.push({ a: { answer: e.message, kind: "error" } }); } draw(); };
-  el.innerHTML = `<div class="chat"><div class="msgs" aria-live="polite"></div><form class="bar" style="margin:0"><input class="grow" placeholder="Ask a question about your CRM" aria-label="Question"><button class="btn primary">Ask</button></form></div>`;
+  el.innerHTML = `<div class="chat">${S.ai && !S.ai.configured ? `<p class="ai-pending">${esc(S.ai.note)}</p>` : ""}<div class="msgs" aria-live="polite"></div><form class="bar" style="margin:0"><input class="grow" placeholder="Ask a question about your CRM" aria-label="Question"><button class="btn primary">Ask</button></form></div>`;
   $("form", el).onsubmit = e => { e.preventDefault(); send($("input", el).value); }; draw(); return send;
 }
 PAGES.assistant = async v => { v.innerHTML = head("AI Assistant", "Answers come from deterministic CRM calculations, scoped to what you are allowed to see.") + `<div class="card" style="height:68vh"><div id="ch" style="height:100%"></div></div>`; mountChat($("#ch")); };
+const LEAD_SUGG = ["Summarise this lead", "Summarise the call transcript", "List objections and next steps", "Draft a follow-up email"];
 function openAI(msg, leadId) { const p = $("#aiPanel"); p.classList.remove("hidden"); p.innerHTML = `<div class="dh"><h2>AI assistant</h2><button class="icon-btn" id="ax" aria-label="Close">✕</button></div><div class="db" id="ap" style="display:flex;flex-direction:column"></div>`; $("#ax").onclick = () => p.classList.add("hidden"); const send = mountChat($("#ap"), leadId); if (msg) send(msg); }
+
+// ---------------------------------------------------------------- ASSIGN LEADS (rank unassigned leads by fit, hand batches to callers)
+const AS = { f: { campaign: "", channel: "", source: "", batch: "", min_fit: 0, signal: false, phone: false }, n: {}, mode: "round_robin", lists: null };
+const asQ = () => qs({ ...AS.f, signal: AS.f.signal ? "true" : "", phone: AS.f.phone ? "true" : "", min_fit: AS.f.min_fit || "" });
+const asListsHtml = () => !AS.lists ? '<p class="muted">Press "Show my Apollo lists" to see the lists in your Apollo account.</p>' : !AS.lists.length ? empty("No people lists found in Apollo", "Upload your outreach list in Apollo first.") :
+  `<div class="tbl-wrap" style="max-height:240px"><table class="tbl"><thead><tr><th></th><th>List</th><th>Contacts (Apollo's count)</th><th></th></tr></thead><tbody>${AS.lists.map(l => `<tr><td><input type="checkbox" data-l="${esc(l.id)}" ${l.synced ? "checked" : ""} aria-label="Sync ${esc(l.name)}"></td><td><b>${esc(l.name)}</b></td><td>${l.count}</td><td>${l.synced ? tag("synced") : ""}</td></tr>`).join("")}</tbody></table></div><div class="acts" style="margin-top:10px"><button class="btn primary" id="alSync">Sync ticked lists as call lists</button></div>`;
+PAGES.assign = async v => {
+  const [pool, people] = await Promise.all([api("/assign/pool?" + asQ() + "&limit=100"), api("/assign/people")]);
+  const tip = x => x.why.map(w => `+${w.points} ${w.label}`).join("\n");
+  v.innerHTML = head("Assign leads", "Unassigned leads ranked by fit. Give each caller a batch: it shows in their Sales Activity straight away, and in Today after a refresh that starts when you assign.") +
+    `<div class="card"><div class="ch"><h2>Apollo call lists</h2><button class="btn sm" id="alLoad">${AS.lists ? "Reload my lists" : "Show my Apollo lists"}</button></div><p class="muted">Upload your outreach list in Apollo, then tick it here and sync. Each list becomes a Calls campaign and its contacts become unassigned leads below. No sequences or emails involved.</p><div id="alBox">${asListsHtml()}</div></div>
+    <div class="card"><h2>1. Who gets how many</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Role</th><th>Has now</th><th>Give</th></tr></thead><tbody>${people.map(u => `<tr><td><b>${esc(u.name)}</b></td><td>${esc(u.role)}</td><td>${u.open_leads} open · ${u.untouched} untouched</td><td><input type="number" min="0" max="500" class="an" data-u="${esc(u.id)}" value="${AS.n[u.id] || ""}" placeholder="0" style="width:90px" aria-label="Leads for ${esc(u.name)}"></td></tr>`).join("") || `<tr><td colspan="4">${empty("No callers yet", "Add callers under Settings > Users.")}</td></tr>`}</tbody></table></div>
+    <div class="bar" style="margin-top:10px"><label style="min-width:320px">How to deal them out<select id="amode">${opts([["round_robin", "Round-robin: everyone gets a similar mix of strong and weaker leads"], ["top_first", "Best first: the first person gets the top N, the next person the next N"]], AS.mode)}</select></label><span class="grow"></span><button class="btn primary" id="aPrev">Preview</button></div><div id="aOut"></div></div>
+    <div class="card"><div class="ch"><h2>2. Unassigned leads, best fit first <span class="muted">${pool.total.toLocaleString()}${pool.total > pool.items.length ? ` · showing the top ${pool.items.length}` : ""}</span></h2></div>
+    ${AS.f.batch ? `<p class="warnc">Showing one batch only. <button class="btn sm" id="abClear">Show all unassigned</button></p>` : ""}<div class="bar"><select id="afc" aria-label="Campaign">${opts(S.campaigns.map(c => [c.id, c.name]).concat([["none", "No campaign"]]), AS.f.campaign, "All campaigns")}</select><select id="afh" aria-label="Channel">${opts(CH_OPTS, AS.f.channel, "Any channel")}</select><select id="afs" aria-label="Source">${opts(S.sources, AS.f.source, "Any source")}</select><label class="chk">Min fit <input type="number" id="afm" min="0" max="100" value="${AS.f.min_fit || ""}" style="width:70px"></label><label class="chk"><input type="checkbox" id="afg" ${AS.f.signal ? "checked" : ""}> Has a signal</label><label class="chk"><input type="checkbox" id="afp" ${AS.f.phone ? "checked" : ""}> Has a phone</label></div>
+    ${pool.items.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Lead</th><th>Fit</th><th>Signal</th><th>Phone</th><th>Campaign</th></tr></thead><tbody>${pool.items.map((x, i) => `<tr class="ar" data-id="${esc(x.id)}" style="cursor:pointer"><td>${i + 1}</td><td><b>${esc(x.full_name)}</b><div class="muted">${esc(x.title)}${x.title && x.company ? " · " : ""}${esc(x.company)}</div></td><td><b title="${esc(tip(x))}">${x.fit}</b><span class="fitbar"><i style="width:${x.fit}%"></i></span></td><td>${esc(x.signal) || '<span class="muted">none</span>'}</td><td>${x.has_phone ? "yes" : '<span class="muted">no</span>'}</td><td>${esc(campOf(x.campaign_id).name)}</td></tr>`).join("")}</tbody></table></div><p class="muted">Fit (0 to 100): signal 35 (+5 with a source link), title seniority up to 25, phone 15, email 5, company 5, LinkedIn 5. Hover a score for its breakdown.</p>` : empty("No unassigned leads match", "Sync a list from Apollo, import leads, or loosen the filters.")}</div>`;
+  const filt = (id, fn) => $(id).onchange = e => { fn(e.target); PAGES.assign(v); };
+  filt("#afc", t => AS.f.campaign = t.value); filt("#afh", t => AS.f.channel = t.value); filt("#afs", t => AS.f.source = t.value); filt("#afm", t => AS.f.min_fit = Math.max(0, Math.min(100, +t.value || 0))); filt("#afg", t => AS.f.signal = t.checked); filt("#afp", t => AS.f.phone = t.checked);
+  if ($("#abClear")) $("#abClear").onclick = () => { AS.f.batch = ""; PAGES.assign(v); };
+  $$(".ar", v).forEach(r => r.onclick = () => openLead(r.dataset.id));
+  $$(".an", v).forEach(i => i.oninput = () => { AS.n[i.dataset.u] = Math.max(0, Math.min(500, +i.value || 0)); });
+  $("#amode").onchange = e => { AS.mode = e.target.value; };
+  $("#alLoad").onclick = async e => { e.target.disabled = true; try { AS.lists = await api("/integrations/apollo/lists"); } catch (er) { AS.lists = null; toast(er.message, true); } PAGES.assign(v); };
+  if ($("#alSync")) $("#alSync").onclick = async e => {
+    const ids = $$("[data-l]", v).filter(c => c.checked).map(c => c.dataset.l); if (!ids.length) return toast("Tick at least one list", true);
+    e.target.disabled = true; e.target.textContent = "Syncing lists from Apollo… (can take a minute)";
+    try { const r = await api("/integrations/apollo/lists/sync", { method: "POST", body: { label_ids: ids } }); toast(`${r.lists} list(s) synced: ${r.leads_created} leads added, ${r.leads_duplicate} already in the CRM${r.truncated ? ". Stopped early, sync again" : ""}.`); await refreshCampaigns(); AS.lists = await api("/integrations/apollo/lists").catch(() => AS.lists); PAGES.assign(v); }
+    catch (er) { toast(er.message, true); e.target.disabled = false; e.target.textContent = "Sync ticked lists as call lists"; }
+  };
+  const payload = dry => ({ people: Object.entries(AS.n).filter(([, n]) => n > 0).map(([user_id, count]) => ({ user_id, count })), mode: AS.mode, filters: AS.f, dry_run: dry });
+  $("#aPrev").onclick = async e => {
+    if (!payload(true).people.length) return toast("Type how many leads each person should get", true);
+    e.target.disabled = true; let r; try { r = await api("/assign/run", { method: "POST", body: payload(true) }); } catch (er) { e.target.disabled = false; return toast(er.message, true); } e.target.disabled = false;
+    const total = r.plan.reduce((a, x) => a + x.assigned, 0);
+    $("#aOut").innerHTML = `<h3 style="margin-top:14px">Preview</h3>${r.shortfall ? `<p class="warnc">Only ${r.pool} lead(s) match the filters, so ${r.shortfall} fewer will be assigned than requested.</p>` : ""}<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Asked</th><th>Getting</th><th>Average fit</th><th>First few</th></tr></thead><tbody>${r.plan.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${x.requested}</td><td>${x.assigned}</td><td>${x.avg_fit}</td><td>${x.sample.map(l => `${esc(l.name)} (${l.fit})`).join(", ")}</td></tr>`).join("")}</tbody></table></div>
+      <div class="acts" style="margin-top:10px"><button class="btn primary" id="aGo" ${total ? "" : "disabled"}>Assign ${total} leads</button></div>`;
+    if ($("#aGo")) $("#aGo").onclick = async b => { b.target.disabled = true; try { const d = await api("/assign/run", { method: "POST", body: payload(false) }); toast(`Assigned ${d.assigned} leads. They are in Sales Activity now; Today refreshes in the background.`); AS.n = {}; PAGES.assign(v); } catch (er) { b.target.disabled = false; toast(er.message, true); } };
+  };
+};
+
+// ---------------------------------------------------------------- NEW DATA (the admin's intake view: decisions are per batch, never per lead)
+const INTAKE_ST = { new: ["New", "s2"], reviewed: ["Reviewed", "s3"], done: ["All assigned", "s7"] };
+function batchAssign(b, people, done) {
+  modal(`<h2>Assign this batch</h2><p class="muted">${esc(b.label)} · ${b.unassigned} lead(s) waiting. The best-fit leads are dealt out first (up to 500 per run).</p>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Has now</th><th>Give</th></tr></thead><tbody>${people.map(u => `<tr><td><b>${esc(u.name)}</b> <span class="muted">${esc(u.role)}</span></td><td>${u.open_leads} open · ${u.untouched} untouched</td><td><input type="number" min="0" max="500" class="bn" data-u="${esc(u.id)}" style="width:90px" aria-label="Leads for ${esc(u.name)}"></td></tr>`).join("") || `<tr><td colspan="3">${empty("No callers yet", "Add callers under Settings > Users.")}</td></tr>`}</tbody></table></div>
+    <div class="bar" style="margin-top:10px"><button class="btn sm" id="bEven" type="button">Split evenly between everyone</button><select id="bMode" aria-label="How to deal them out">${opts([["round_robin", "Round-robin (similar mix for everyone)"], ["top_first", "Best first (first person gets the top N)"]], "round_robin")}</select></div><div id="bOut"></div>
+    <div class="acts"><button class="btn" id="bX">Cancel</button><button class="btn primary" id="bPrev">Preview</button></div>`, { wide: true });
+  const inputs = () => $$(".bn"), payload = dry => ({ people: inputs().filter(i => +i.value > 0).map(i => ({ user_id: i.dataset.u, count: Math.min(500, +i.value) })), mode: $("#bMode").value, filters: { batch: b.id }, dry_run: dry });
+  $("#bX").onclick = closeModal;
+  $("#bEven").onclick = () => { const k = inputs().length, total = Math.min(b.unassigned, 500); inputs().forEach((i, n) => { i.value = k ? Math.floor(total / k) + (n < total % k ? 1 : 0) : ""; }); };
+  $("#bPrev").onclick = async e => {
+    if (!payload(true).people.length) return toast("Type how many leads each person should get", true);
+    e.target.disabled = true; let r; try { r = await api("/assign/run", { method: "POST", body: payload(true) }); } catch (er) { e.target.disabled = false; return toast(er.message, true); } e.target.disabled = false;
+    const total = r.plan.reduce((a, x) => a + x.assigned, 0);
+    $("#bOut").innerHTML = `<h3 style="margin-top:12px">Preview</h3>${r.shortfall ? `<p class="warnc">Only ${r.pool} lead(s) are waiting, so ${r.shortfall} fewer will be assigned than asked.</p>` : ""}<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Getting</th><th>Average fit</th></tr></thead><tbody>${r.plan.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${x.assigned}</td><td>${x.avg_fit}</td></tr>`).join("")}</tbody></table></div><div class="acts"><button class="btn primary" id="bGo" ${total ? "" : "disabled"}>Assign ${total} leads</button></div>`;
+    if ($("#bGo")) $("#bGo").onclick = async g => { g.target.disabled = true; try { const d = await api("/assign/run", { method: "POST", body: payload(false) }); closeModal(); toast(`Assigned ${d.assigned} leads. Callers see them in Sales Activity now.`); done(); } catch (er) { g.target.disabled = false; toast(er.message, true); } };
+  };
+}
+PAGES.intake = async v => {
+  const d = await api("/intake"), s = d.summary, tile = (l, x) => `<div class="card kpi"><span class="l">${l}</span><span class="v">${x}</span></div>`;
+  const when = x => x.at ? fdate(x.at) : "";
+  v.innerHTML = head("New data", "What has arrived and what still needs an owner. Review and assign whole batches: nobody has to approve leads one by one.", '<button class="btn primary" id="inAs">Open Assign leads</button>') +
+    `<div class="grid g4">${tile("Waiting for an owner", s.unassigned.toLocaleString())}${tile("Added this week", s.new_7d.toLocaleString())}${tile("With a signal", s.with_signal.toLocaleString())}${tile("With a phone", s.with_phone.toLocaleString())}</div>
+    <div class="card" style="margin-top:14px"><div class="ch"><h2>Batches <span class="muted">${s.batches_to_review} to review</span></h2></div>${d.batches.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Batch</th><th>Source</th><th>Waiting</th><th>Assigned</th><th>Signal</th><th>Phone</th><th>Avg fit</th><th>Status</th><th></th></tr></thead><tbody>${d.batches.map(b => `<tr><td><b>${esc(b.label)}</b><div class="muted">${esc(b.campaigns.join(", ")) || "No campaign"}${b.by ? " · " + esc(b.by) : ""}${b.at ? " · " + when(b) : ""}</div></td><td>${esc(b.source)}</td><td><b>${b.unassigned}</b> <span class="muted">of ${b.total}</span></td><td>${b.assigned}</td><td>${b.with_signal}</td><td>${b.with_phone}</td><td>${b.unassigned ? b.avg_fit : "-"}</td><td><span class="pill ${INTAKE_ST[b.status][1]}">${INTAKE_ST[b.status][0]}</span></td><td style="white-space:nowrap">${b.unassigned ? `<button class="btn sm" data-rv="${esc(b.id)}">Review leads</button> <button class="btn sm primary" data-as="${esc(b.id)}">Assign…</button>` : ""}${b.status === "new" && b.id !== "none" ? ` <button class="btn sm" data-ok="${esc(b.id)}" title="Mark this whole batch as looked at">Mark reviewed</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : empty("No data yet", "Sync an Apollo list or import leads. Each import or sync shows up here as one batch.")}</div>
+    <div class="card" style="margin-top:14px"><h2>Callers' capacity</h2>${d.people.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Role</th><th>Open leads</th><th>Never contacted</th></tr></thead><tbody>${d.people.map(u => `<tr><td><b>${esc(u.name)}</b></td><td>${esc(u.role)}</td><td>${u.open_leads}</td><td>${u.untouched}</td></tr>`).join("")}</tbody></table></div>` : empty("No callers yet", "Add callers under Settings > Users.")}</div>`;
+  const toAssign = batch => { AS.f = { campaign: "", channel: "", source: "", batch: batch || "", min_fit: 0, signal: false, phone: false }; location.hash = "#/assign"; };
+  $("#inAs").onclick = () => toAssign("");
+  $$("[data-rv]", v).forEach(b => b.onclick = () => toAssign(b.dataset.rv));
+  $$("[data-as]", v).forEach(b => b.onclick = () => batchAssign(d.batches.find(x => x.id === b.dataset.as), d.people, () => PAGES.intake(v)));
+  $$("[data-ok]", v).forEach(b => b.onclick = async () => { b.disabled = true; try { await api(`/intake/batches/${b.dataset.ok}/review`, { method: "POST" }); toast("Batch marked as reviewed"); PAGES.intake(v); } catch (e) { b.disabled = false; toast(e.message, true); } });
+};
 
 // ---------------------------------------------------------------- INTEGRATIONS
 PAGES.integrations = async v => {
@@ -614,7 +806,7 @@ function showLogin() {
     try { await S.fb.A.signInWithEmailAndPassword(S.fb.auth, $("#lEmail").value, $("#lPass").value); }
     catch (er) { $("#lErr").textContent = `Sign-in failed: ${LOGIN_ERRORS[er.code] || er.message || "unknown error"} (${er.code || "no code"})`; btn.disabled = false; btn.textContent = "Sign in"; console.error(er); return; }
     $("#login").classList.add("hidden"); $("#loginForm").reset(); btn.disabled = false; btn.textContent = "Sign in";
-    history.replaceState(null, "", "#/today"); await start();                      // no page reload, and always begins at the start page
+    history.replaceState(null, "", "#/"); await start();                      // no page reload, and always begins at the start page
   };
 }
 async function boot() {
@@ -629,12 +821,12 @@ async function start() {
   bootStatus("Loading your workspace…");
   let m; try { m = await api("/meta"); } catch (e) { return cannotStart(e.message); }
   let prev = null; try { prev = localStorage.getItem("crm_uid"); localStorage.setItem("crm_uid", m.me.id); } catch { }
-  if (prev !== m.me.id) history.replaceState(null, "", "#/today");                // a different person (or a first visit) always starts at the beginning
-  Object.assign(S, { me: m.me, perms: m.perms, stages: m.stages, outcomes: m.outcomes, sources: m.sources, users: m.users, types: m.activity_types, oppStages: m.opp_stages, campaigns: m.campaigns, obt: m.outcomes_by_type });
+  if (prev !== m.me.id) history.replaceState(null, "", "#/");                // a different person (or a first visit) always starts at the beginning
+  Object.assign(S, { me: m.me, perms: m.perms, stages: m.stages, outcomes: m.outcomes, sources: m.sources, users: m.users, types: m.activity_types, oppStages: m.opp_stages, campaigns: m.campaigns, obt: m.outcomes_by_type, ai: m.ai });
   $("#app").classList.remove("hidden");
   $("#me").innerHTML = `<span>${esc(m.me.name)} · ${esc(m.me.role)}</span><span class="av">${esc(m.me.name[0])}</span>${CFG.AUTH_ENABLED ? '<button class="btn sm" id="so">Sign out</button>' : ""}`;
   if (m.demo) $("#demoBadge").classList.remove("hidden");
-  if (m.auth_disabled && !CFG.AUTH_ENABLED) { $("#mockWrap").classList.remove("hidden"); $("#mockSel").innerHTML = opts(m.users.map(u => [u.id, `${u.name} · ${u.role}`]), m.me.id); $("#mockSel").onchange = e => { localStorage.setItem("mockUser", e.target.value); location.hash = "#/today"; location.reload(); }; }
+  if (m.auth_disabled && !CFG.AUTH_ENABLED) { $("#mockWrap").classList.remove("hidden"); $("#mockSel").innerHTML = opts(m.users.map(u => [u.id, `${u.name} · ${u.role}`]), m.me.id); $("#mockSel").onchange = e => { localStorage.setItem("mockUser", e.target.value); location.hash = "#/"; location.reload(); }; }
   if ($("#so")) $("#so").onclick = signOut;
   $("#sideFoot").textContent = CFG.AUTH_ENABLED ? "Signed in with Firebase" : "Test mode: auth switch is OFF";
   const dark = () => (document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")) === "dark"; const paint = () => $("#themeBtn").textContent = dark() ? "☀" : "☾";

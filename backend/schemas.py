@@ -14,8 +14,11 @@ class LeadIn(BaseModel):
     country: str = ""
     source: str = "Manual"
     source_detail: str = ""
+    signal: str = ""
+    signal_url: str = ""
     owner_id: Optional[str] = None
     campaign_id: Optional[str] = None
+    channels: List[str] = []         # call | linkedin | email (any mix); empty = follow the campaign
     tags: List[str] = []
 
 class LeadPatch(BaseModel):
@@ -29,7 +32,10 @@ class LeadPatch(BaseModel):
     website: Optional[str] = None
     location: Optional[str] = None
     country: Optional[str] = None
+    signal: Optional[str] = None
+    signal_url: Optional[str] = None
     campaign_id: Optional[str] = None
+    channels: Optional[List[str]] = None
     tags: Optional[List[str]] = None
     verified_fields: Optional[List[str]] = None
 
@@ -74,6 +80,9 @@ class ImportOptions(BaseModel):
     policy: str = "skip"             # skip | update | separate
     source: str = "File Upload"
     campaign_id: Optional[str] = None
+    new_campaign_name: Optional[str] = None   # create (or reuse by name) a campaign for this import
+    channels: List[str] = []                  # where these leads show up in Sales Activity: any of call, linkedin, email
+    owner_id: Optional[str] = None            # who works them (callers only see their own leads)
     confirm_separate: bool = False
 
 class ApolloSearch(BaseModel):
@@ -81,15 +90,43 @@ class ApolloSearch(BaseModel):
     company: str = ""
     location: str = ""
     keywords: str = ""
+    seniority: str = ""
     page: int = 1
+    per_page: int = 25
 
 class ApolloImport(BaseModel):
     records: List[Dict[str, Any]]
     policy: str = "skip"
     campaign_id: Optional[str] = None
+    new_campaign_name: Optional[str] = None
+    channels: List[str] = []
+    owner_id: Optional[str] = None
+
+class ApolloListSync(BaseModel):
+    label_ids: List[str] = []
+
+class AssignFilters(BaseModel):
+    campaign: str = ""
+    channel: str = ""
+    source: str = ""
+    min_fit: int = 0
+    signal: bool = False
+    phone: bool = False
+    batch: str = ""
+
+class AssignPerson(BaseModel):
+    user_id: str
+    count: int
+
+class AssignRun(BaseModel):
+    people: List[AssignPerson]
+    mode: str = "round_robin"
+    filters: AssignFilters = AssignFilters()
+    dry_run: bool = True
 
 class EnrichIn(BaseModel):
-    lead_ids: List[str]
+    lead_ids: List[str] = []
+    all: bool = False
     confirm: bool = False
 
 class OppIn(BaseModel):

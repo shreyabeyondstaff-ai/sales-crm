@@ -6,4 +6,15 @@ Import rows live in `importBatches/{id}/rows/{chunk}` (about 400 KB per chunk) a
 Users: first-login accounts are created with `pending: true, active: false` (see FIRST_LOGIN_POLICY / BOOTSTRAP_ADMIN_EMAILS in .env.example).
 Notes: `stage_history` is bounded in practice; move to a subcollection if it grows. Firestore Rules are defence in depth only: the Admin SDK bypasses them, so backend checks stay mandatory.
 
-campaigns(name, channel[call|linkedin|email|mixed], color, archived). leads gain campaign_id and touches. Add index: leads(campaign_id, created_at desc).
+campaigns(name, channel[call|linkedin|email|mixed], color, archived, apollo_id?, source?). leads gain campaign_id and touches. Add index: leads(campaign_id, created_at desc).
+
+## Added with the signal / Apollo / enrichment / AI work
+- **leads**: `signal` (text, up to ~240 chars, typed, uploaded or imported by a person) and `signal_url` (optional source link). `enrichment_state` is now one of `not_enriched | enriched | no_new_data | no_match`. `apollo_id` is the Apollo person id.
+- **enrichmentJobs**: `status` (queued|running|completed|partial|failed), `scope` (all|selected), `total`, `processed`, `credits_used`, `counts{}`, `error?`, `items[{lead_id,name,status,updated?,error?,note?}]`. A job is capped at 500 leads so the document stays far below the 1 MB limit. A job stuck in queued/running for over 30 minutes is treated as interrupted and stops blocking new jobs.
+- **leads** also carry `channels` (list of `call|linkedin|email`; empty = follow the campaign's channel). Set at import (file wizard or Apollo import, together with `campaign_id`/owner), editable on the lead. `importBatches` of a file import record `campaign_id` and `channels`.
+- **leads** also carry `apollo_contact_id` (Apollo's contact id, set by the sequence sync; used to match emails and, later, calls).
+- **activities** created by the Apollo email sync: `source: "apollo"`, `user: "Apollo"`, `apollo_message_id`, `external_ref: "apollo:<id>"`, ids `act_apm_<id>` (sent; `opened`/`clicked` flags, `subject`, `campaign_name`, `step`), `act_apb_<id>` (bounced), `act_apr_<id>` (reply, with `reply_class`). `config/apollo_email_sync` stores the last sync summary.
+- **campaigns** created from an Apollo list carry `source: "apollo_list"`, `apollo_label_id`, channel `call`. Bulk assignment writes `lead.assign` audit entries per lead plus one `assign.bulk` summary.
+- **campaigns** synced from Apollo carry `apollo_id`, `source: "apollo"`, `synced_at`.
+- **Removed**: the `signals` collection and the signal-scout agent (`agentRuns` no longer records `provider` or `signals_checked`). Existing `signals` documents are simply ignored and can be deleted.
+- **transcripts** (collection read by the AI assistant for lead questions; filled by the Apollo call sync, which is not built yet): `lead_id`, `started_at`, `text`. Only that lead's transcripts are ever read for a question.

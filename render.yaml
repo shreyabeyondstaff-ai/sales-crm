@@ -17,8 +17,6 @@ services:
         value: test123@gmail.com
       - key: AI_PROVIDER
         value: none
-      - key: SIGNAL_PROVIDER
-        value: demo
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false                                 # paste the FULL contents of the Firebase service account key; never commit it
       - key: APOLLO_API_KEY

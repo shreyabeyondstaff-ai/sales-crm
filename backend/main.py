@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, Header, Request, UploadFile, File, Backgro
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import hmac, firebase, services as sv, agents as ag, story as st
+import hmac, firebase, ai, services as sv, agents as ag, story as st
 from firebase import db, AUTH_DISABLED
 from schemas import *
 
@@ -76,7 +76,7 @@ def meta(user=Depends(auth)):
     s = sv.settings(); perms = sorted(sv.PERMS[user["role"]])
     users = [{"id": u["id"], "name": u["name"], "role": u["role"]} for u in db.list("users") if u.get("active", True)]
     return {"me": {k: user.get(k) for k in ("id", "name", "role", "email")}, "perms": perms, "auth_disabled": AUTH_DISABLED, "stages": s["stages"], "outcomes": s["outcomes"],
-            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
+            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "ai": ai.status(), "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
 
 # ------------------------------------------------------------------ leads
 @app.get(V + "/leads")
@@ -144,15 +144,7 @@ def imp_errors(bid: str, o: ImportOptions, user=Depends(need("import"))):
 def integ(user=Depends(need("integrations:read"))): return sv.integrations()
 
 @app.post(V + "/integrations/{name}/test")
-def integ_test(name: str, user=Depends(need("integrations:read"))):
-    i = next((x for x in sv.integrations() if x["id"] == name), None)
-    if not i: raise HTTPException(404, {"code": "not_found", "message": "Unknown integration"})
-    if i["status"] != "connected": return {"ok": False, "message": f"Pending configuration. Set {i['env']} in .env"}
-    if name == "apollo":      # real call: a 1-result search proves the key works for the endpoint we use (check your plan's rate/credit rules)
-        try: sv._apollo("/mixed_people/api_search", params=[("per_page", 1), ("person_titles[]", "CEO")])
-        except HTTPException as e: return {"ok": False, "message": e.detail.get("message", "Apollo check failed")}
-        return {"ok": True, "message": "Apollo key works (people search reachable)"}
-    return {"ok": True, "message": "Key present (live check not implemented for this provider)"}
+def integ_test(name: str, user=Depends(need("integrations:read"))): return sv.test_integration(name)
 
 @app.post(V + "/integrations/apollo/search")
 def apollo_s(b: ApolloSearch, user=Depends(need("import"))): return sv.apollo_search(user, b)
@@ -160,12 +152,47 @@ def apollo_s(b: ApolloSearch, user=Depends(need("import"))): return sv.apollo_se
 @app.post(V + "/integrations/apollo/sync-campaigns")
 def apollo_sync(user=Depends(need("assign"))): return sv.sync_apollo_campaigns(user)
 
+@app.post(V + "/integrations/apollo/sync-emails")
+def apollo_sync_emails(user=Depends(need("assign"))): return sv.sync_apollo_emails(user)
+
+@app.get(V + "/integrations/apollo/lists")
+def apollo_lists_route(user=Depends(need("assign"))): return sv.apollo_lists(user)
+
+@app.post(V + "/integrations/apollo/lists/sync")
+def apollo_lists_sync(b: ApolloListSync, user=Depends(need("assign"))): return sv.sync_apollo_lists(user, b.label_ids or None)
+
+@app.get(V + "/intake")
+def intake(user=Depends(need("assign"))): return sv.intake_overview(user)
+
+@app.post(V + "/intake/batches/{bid}/review")
+def intake_review(bid: str, user=Depends(need("assign"))): return sv.review_batch(user, bid)
+
+@app.get(V + "/assign/people")
+def assign_people(user=Depends(need("assign"))): return sv.assignees(user)
+
+@app.get(V + "/assign/pool")
+def assign_pool(campaign: str = "", channel: str = "", source: str = "", batch: str = "", min_fit: int = 0, signal: bool = False, phone: bool = False, limit: int = 100, user=Depends(need("assign"))):
+    return sv.assignment_pool(user, {"campaign": campaign, "channel": channel, "source": source, "batch": batch, "min_fit": min_fit, "signal": signal, "phone": phone}, min(max(limit, 1), 500))
+
+def _agents_after_assign():
+    try: ag.run_agents(ag.SYSTEM, "assign")      # refresh the Today suggestions so assigned leads show up there too
+    except Exception: pass
+
+@app.post(V + "/assign/run")
+def assign_run_route(b: AssignRun, bg: BackgroundTasks, user=Depends(need("assign"))):
+    r = sv.assign_run(user, b.people, b.mode, b.filters.model_dump(), b.dry_run)
+    if not b.dry_run and r["assigned"]: bg.add_task(_agents_after_assign)
+    return r
+
 @app.post(V + "/integrations/apollo/import")
 def apollo_i(b: ApolloImport, user=Depends(need("import"))): return sv.apollo_import(user, b)
 
 @app.post(V + "/enrichment/jobs", status_code=202)
 def enr_create(b: EnrichIn, bg: BackgroundTasks, user=Depends(need("enrich"))):
-    j = sv.create_enrichment(user, b.lead_ids, b.confirm); bg.add_task(sv.run_enrichment, j["id"]); return j
+    j = sv.create_enrichment(user, b.lead_ids, b.confirm, all_=b.all); bg.add_task(sv.run_enrichment, j["id"]); return j
+
+@app.get(V + "/enrichment/preview")
+def enr_preview(user=Depends(need("enrich"))): return sv.enrichment_preview(user)
 
 @app.get(V + "/enrichment/jobs")
 def enr_list(user=Depends(need("enrich"))): return db.query("enrichmentJobs", order_by="at", desc=True, limit=30)
@@ -243,6 +270,9 @@ def ai_chat(b: ChatIn, user=Depends(need("ai:use"))):
 def ai_confirm(aid: str, user=Depends(need("ai:use"))): return sv.confirm_ai_action(user, aid)
 
 # ------------------------------------------------------------------ Today command center (all changes need human approval)
+@app.get(V + "/today/mine")
+def today_mine(user=Depends(need("activities:write"))): return ag.my_day(user)
+
 @app.get(V + "/today")
 def today(user=Depends(need("reports:read"))): return ag.today(user)
 

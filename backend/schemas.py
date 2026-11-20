@@ -128,6 +128,7 @@ class EnrichIn(BaseModel):
     lead_ids: List[str] = []
     all: bool = False
     confirm: bool = False
+    refresh: bool = False      # re-check Apollo and update values that changed (verified values are kept)
 
 class OppIn(BaseModel):
     lead_id: str
@@ -174,3 +175,34 @@ class CampaignPatch(BaseModel):
     channel: Optional[str] = None
     color: Optional[str] = None
     archived: Optional[bool] = None
+
+class CompanyListIn(BaseModel):
+    name: str
+
+class CompanyListPatch(BaseModel):
+    name: Optional[str] = None
+    archived: Optional[bool] = None
+
+class CompanyIn(BaseModel):
+    list_id: str
+    name: str
+    website: str = ""
+    industry: str = ""
+    city: str = ""
+    country: str = ""
+    phone: str = ""
+    description: str = ""
+
+class CompanyPatch(BaseModel):
+    name: Optional[str] = None
+    website: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    industry: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    phone: Optional[str] = None
+    description: Optional[str] = None
+    cues: Optional[Dict[str, str]] = None      # cue label -> new value (a new label adds a field)
+
+class CompanyApolloSync(BaseModel):
+    label_ids: Optional[List[str]] = None

@@ -2,19 +2,22 @@
 Every protected route resolves role + record scope on the SERVER. Never trust the browser."""
 import os, time, uuid
 from typing import Optional
-from fastapi import FastAPI, Depends, Header, Request, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Depends, Header, Request, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import hmac, firebase, ai, services as sv, agents as ag, story as st
+from fastapi.middleware.gzip import GZipMiddleware
+import hmac, threading, firebase, ai, services as sv, agents as ag, story as st, companies as co
 from firebase import db, AUTH_DISABLED
 from schemas import *
 
 app = FastAPI(title="Internal Sales CRM", version="1.0.0")
+app.add_middleware(GZipMiddleware, minimum_size=800)      # app.js and every JSON page shrink about 5x on the wire
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8000").split(","), allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
 def _startup():
+    if firebase.USE_FIRESTORE: threading.Thread(target=firebase.db.warm, daemon=True).start()     # load the hot collections now, so the first person in doesn't wait for them
     if not firebase.USE_FIRESTORE:
         sv.seed()   # demo data only in memory mode
         try: ag.run_agents(ag.SYSTEM, "startup")
@@ -86,8 +89,17 @@ def leads(q: str = "", stage: str = "", source: str = "", owner: str = "", statu
 @app.post(V + "/leads", status_code=201)
 def lead_create(b: LeadIn, user=Depends(need("leads:write"))): return sv.create_lead(user, b)
 
+@app.get(V + "/leads/board")
+def leads_board(q: str = "", stage: str = "", source: str = "", owner: str = "", status: str = "", sort: str = "created_at", desc: bool = True, campaign: str = "", channel: str = "", limit: int = 10, user=Depends(need("leads:read"))):
+    return sv.lead_board(user, q, stage, source, owner, status, campaign, channel, sort, desc, min(max(limit, 1), 50))
+
 @app.get(V + "/leads/{lid}")
-def lead_get(lid: str, user=Depends(need("leads:read"))): return sv.get_lead(user, lid)
+def lead_get(lid: str, user=Depends(need("leads:read"))):
+    l = sv.get_lead(user, lid); c = co.for_lead(l)
+    return {**l, "company_brief": co.brief(c) if c else None}
+
+@app.get(V + "/leads/{lid}/company")
+def lead_company(lid: str, user=Depends(need("leads:read"))): return co.brief_for_lead(user, lid)
 
 @app.patch(V + "/leads/{lid}")
 def lead_patch(lid: str, b: LeadPatch, user=Depends(need("leads:write"))): return sv.update_lead(user, lid, b)
@@ -115,6 +127,41 @@ def camp_new(b: CampaignIn, user=Depends(need("leads:read"))): return sv.create_
 
 @app.patch(V + "/campaigns/{cid}")
 def camp_patch(cid: str, b: CampaignPatch, user=Depends(need("leads:read"))): return sv.patch_campaign(user, cid, b)
+
+# ------------------------------------------------------------------ companies (company-level lists and call cues)
+@app.get(V + "/companies/board")
+def co_board(q: str = "", list: str = "", user=Depends(need("companies:read"))): return co.board(user, q, list)
+
+@app.get(V + "/companies")
+def co_page(list: str, q: str = "", cursor: str = "", limit: int = 50, user=Depends(need("companies:read"))): return co.page(user, list, q, cursor, limit)
+
+@app.post(V + "/companies/import")
+async def co_import(file: UploadFile = File(...), list_id: str = Form(""), new_list_name: str = Form(""), preview: bool = Form(True), user=Depends(need("companies:write"))):
+    return co.import_file(user, file.filename or "", await file.read(), list_id, new_list_name, preview)
+
+@app.post(V + "/companies", status_code=201)
+def co_new(b: CompanyIn, user=Depends(need("companies:write"))): return co.create_company(user, b)
+
+@app.get(V + "/companies/apollo-lists")
+def co_apollo_lists(user=Depends(need("companies:write"))): return co.apollo_lists(user)
+
+@app.post(V + "/companies/apollo-sync")
+def co_apollo_sync(b: CompanyApolloSync, user=Depends(need("companies:write"))): return co.sync_apollo(user, b.label_ids or None)
+
+@app.get(V + "/companies/{cid}")
+def co_get(cid: str, user=Depends(need("companies:read"))): return co.get(user, cid)
+
+@app.patch(V + "/companies/{cid}")
+def co_patch(cid: str, b: CompanyPatch, user=Depends(need("companies:write"))): return co.patch_company(user, cid, b)
+
+@app.delete(V + "/companies/{cid}")
+def co_del(cid: str, user=Depends(need("companies:write"))): return co.delete_company(user, cid)
+
+@app.post(V + "/company-lists", status_code=201)
+def col_new(b: CompanyListIn, user=Depends(need("companies:write"))): return co.create_list(user, b.name)
+
+@app.patch(V + "/company-lists/{lid}")
+def col_patch(lid: str, b: CompanyListPatch, user=Depends(need("companies:write"))): return co.patch_list(user, lid, b.name, b.archived)
 
 # ------------------------------------------------------------------ imports
 @app.post(V + "/imports/upload")
@@ -189,7 +236,7 @@ def apollo_i(b: ApolloImport, user=Depends(need("import"))): return sv.apollo_im
 
 @app.post(V + "/enrichment/jobs", status_code=202)
 def enr_create(b: EnrichIn, bg: BackgroundTasks, user=Depends(need("enrich"))):
-    j = sv.create_enrichment(user, b.lead_ids, b.confirm, all_=b.all); bg.add_task(sv.run_enrichment, j["id"]); return j
+    j = sv.create_enrichment(user, b.lead_ids, b.confirm, all_=b.all, refresh=b.refresh); bg.add_task(sv.run_enrichment, j["id"]); return j
 
 @app.get(V + "/enrichment/preview")
 def enr_preview(user=Depends(need("enrich"))): return sv.enrichment_preview(user)

@@ -3,6 +3,7 @@ import csv, io, re, os, random, json, time
 from math import ceil
 import httpx
 import ai
+import companies as co
 from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 from fastapi import HTTPException
@@ -42,14 +43,18 @@ OUTCOME_STAGE_HINT = {"No Answer": "Attempted Contact", "Busy": "Attempted Conta
 # Roles: admin = manager/CEO, caller, developer, da = data analyst, outreach = outreach team
 PERMS = {
     "admin": {"*"}, "developer": {"*"},
-    "da": {"leads:read", "tasks:read", "opps:read", "reports:read", "ai:use", "activities:read", "export"},
+    "da": {"leads:read", "tasks:read", "opps:read", "reports:read", "ai:use", "activities:read", "export", "companies:read"},
     "caller": {"leads:read", "leads:write", "activities:read", "activities:write", "tasks:read", "tasks:write",
                "opps:read", "opps:write", "reports:read", "ai:use", "agents:act"},
     "outreach": {"leads:read", "leads:write", "leads:create", "import", "enrich", "assign", "activities:read",
                  "activities:write", "tasks:read", "tasks:write", "opps:read", "opps:write", "reports:read",
-                 "ai:use", "export", "integrations:read", "agents:act", "agents:run"},
+                 "ai:use", "export", "integrations:read", "agents:act", "agents:run", "companies:read", "companies:write"},
 }
 def can(user, perm): p = PERMS.get(user["role"], set()); return "*" in p or perm in p
+def signal(l):
+    """Why call now: the lead's own signal, else its company's signal (company lists carry the signal; people lists do not)."""
+    return (l.get("signal") or "").strip() or co.signal_for_lead(l)
+
 def lead_channels(l, camps):
     """Channels a lead is worked on: its own list when set (multi-channel outreach), else its campaign's channel. [] = unspecified (shows under All only)."""
     own = [c for c in (l.get("channels") or []) if c in CH3]
@@ -112,15 +117,17 @@ def n_li(u): return re.sub(r"^https?://(www\.)?|/+$|\?.*$", "", (u or "").strip(
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def find_dupe(rec, leads=None):
-    """Return (lead, confidence, signal). Name+company is low confidence => human review."""
+    """Return (lead, confidence, signal). Name+company is low confidence => human review.
+    A phone number alone is NOT a match: many people at one company share its switchboard number. It only counts together with the same name."""
     leads = leads if leads is not None else active_leads()
     e, p, li, ap = n_email(rec.get("email")), n_phone(rec.get("phone")), n_li(rec.get("linkedin_url")), rec.get("apollo_id")
+    nm = f"{rec.get('first_name','')} {rec.get('last_name','')}".strip().lower()
     for l in leads:
         if e and n_email(l.get("email")) == e: return l, "high", "email"
         if ap and l.get("apollo_id") == ap: return l, "high", "apollo_id"
         if li and n_li(l.get("linkedin_url")) == li: return l, "high", "linkedin"
-        if p and n_phone(l.get("phone")) == p: return l, "high", "phone"
-    nm = f"{rec.get('first_name','')} {rec.get('last_name','')}".strip().lower(); co = (rec.get("company") or "").lower()
+        if p and nm and n_phone(l.get("phone")) == p and (l.get("full_name") or "").lower() == nm: return l, "high", "phone+name"
+    co = (rec.get("company") or "").lower()
     if nm and co:
         for l in leads:
             if l["full_name"].lower() == nm and (l.get("company") or "").lower() == co: return l, "low", "name+company"
@@ -158,13 +165,19 @@ def create_lead(user, body):
     l = new_lead(d, user, owner=d.get("owner_id")); audit(user, "lead.create", "lead", l["id"], l["source"])
     return l
 
-def list_leads(user, q="", stage="", source="", owner="", status="", sort="created_at", desc=True, cursor="", limit=25, view="", campaign="", channel=""):
-    eq = {}                                    # pushed to the store; sorting/paging below runs on the narrowed set
+def _camp_set(campaign):
+    """'a,b,none' -> {'a','b',None}: campaign filters accept several campaigns at once ('none' = leads without a campaign)."""
+    return {(None if x == "none" else x) for x in (campaign or "").split(",") if x}
+
+def _filtered(user, q="", stage="", source="", owner="", status="", campaign="", channel=""):
+    eq = {}                                    # pushed to the store; everything else runs on the narrowed set
     if stage: eq["stage"] = stage
     if source: eq["source"] = source
-    if campaign: eq["campaign_id"] = None if campaign == "none" else campaign
+    cs = _camp_set(campaign)
+    if len(cs) == 1: eq["campaign_id"] = next(iter(cs))
     if owner: eq["owner_id"] = None if owner == "unassigned" else owner
     ls = [l for l in active_leads(user, **eq) if visible(user, l)]
+    if len(cs) > 1: ls = [l for l in ls if (l.get("campaign_id") or None) in cs]
     if q:
         q = q.lower(); ls = [l for l in ls if q in (l["full_name"] + l.get("company", "") + l.get("email", "") + l.get("phone", "") + l.get("title", "")).lower()]
     if channel:
@@ -174,13 +187,31 @@ def list_leads(user, q="", stage="", source="", owner="", status="", sort="creat
     if status == "no_next_action": ls = [l for l in ls if not l.get("next_action") and l["stage"] not in TERMINAL]
     if status == "untouched": ls = [l for l in ls if not l.get("last_activity_at") and l["stage"] not in TERMINAL]
     if status == "unassigned": ls = [l for l in ls if not l.get("owner_id")]
+    return ls
+
+def _page(ls, sort, desc, cursor, limit):
     key = sort if sort in ("created_at", "full_name", "company", "stage", "last_activity_at", "next_action_due", "source", "updated_at") else "created_at"
-    ls.sort(key=lambda l: (l.get(key) is None, str(l.get(key) or "").lower()), reverse=False)
-    present = [l for l in ls if l.get(key)]; missing = [l for l in ls if not l.get(key)]
-    present.sort(key=lambda l: str(l[key]).lower(), reverse=desc); ls = present + missing
+    present = sorted((l for l in ls if l.get(key)), key=lambda l: str(l[key]).lower(), reverse=desc); ls = present + [l for l in ls if not l.get(key)]
     start = int(cursor or 0); limit = min(max(limit, 1), 100)
-    page = ls[start:start + limit]; nxt = str(start + limit) if start + limit < len(ls) else None
-    return {"items": page, "next_cursor": nxt, "total": len(ls)}
+    page = [dict(l, has_company=bool(co.for_lead(l))) for l in ls[start:start + limit]]       # a copy per row: the flag is for the screen, never saved
+    return {"items": page, "next_cursor": str(start + limit) if start + limit < len(ls) else None, "total": len(ls)}
+
+def list_leads(user, q="", stage="", source="", owner="", status="", sort="created_at", desc=True, cursor="", limit=25, view="", campaign="", channel=""):
+    return _page(_filtered(user, q, stage, source, owner, status, campaign, channel), sort, desc, cursor, limit)
+
+def lead_board(user, q="", stage="", source="", owner="", status="", campaign="", channel="", sort="created_at", desc=True, per=10):
+    """The Leads board in ONE request: every campaign group with its first rows. (It used to be one request per campaign, each re-reading every lead.)"""
+    ls = _filtered(user, q, stage, source, owner, status, "", ""); camps = {c["id"]: c for c in db.list("campaigns")}; groups = defaultdict(list)
+    for l in ls: groups[l.get("campaign_id") or "none"].append(l)
+    cs = list_campaigns(user); want = _camp_set(campaign)
+    if want: cs = [c for c in cs if c["id"] in want]
+    elif channel: cs = [c for c in cs if c["channel"] == channel]
+    out = {}
+    for c in cs:
+        g = groups.get(c["id"], [])
+        if channel and not want: g = [l for l in g if _in_channel(l, camps, channel)]
+        out[c["id"]] = _page(g, sort, desc, "", per)
+    return {"campaigns": cs, "groups": out}
 
 def update_lead(user, lid, patch):
     l = get_lead(user, lid); p = patch.model_dump(exclude_none=True)
@@ -423,7 +454,7 @@ def _import_target(user, campaign_id, channels, new_name, owner_id, default_name
     elif (new_name or "").strip():
         if not can(user, "assign"): err("forbidden", "Creating a campaign needs the assign permission", 403)
         name = new_name.strip()[:80]; hit = db.query("campaigns", [("name", "==", name), ("archived", "==", False)], limit=1)
-        camp = hit[0] if hit else db.put("campaigns", uid("camp"), {"name": name, "channel": chs[0] if len(chs) == 1 else "mixed", "color": CAMP_COLORS[len(db.list("campaigns")) % len(CAMP_COLORS)], "archived": False, "created_at": now()})
+        camp = hit[0] if hit else db.put("campaigns", uid("camp"), {"name": name, "channel": chs[0] if len(chs) == 1 else "mixed", "color": CAMP_COLORS[len(db.list("campaigns")) % len(CAMP_COLORS)], "archived": False, "created_at": now(), "source": "import"})
         if not hit: audit(user, "campaign.create", "campaign", camp["id"], f"{name} (from import)")
     if owner_id:
         if not can(user, "assign"): err("forbidden", "Assigning an owner needs the assign permission", 403)
@@ -460,9 +491,22 @@ def rollback_import(user, bid):
     if not b or b["status"] != "done": err("not_found", "Nothing to roll back", 404)
     blockers = {a["lead_id"] for a in for_leads("activities", b["created_ids"])}
     if blockers: err("unsafe_rollback", f"{len(blockers)} imported lead(s) already have activity, rollback is unsafe", 409)
-    for t in for_leads("tasks", b["created_ids"]): db.delete("tasks", t["id"])
-    for i in b["created_ids"]: db.delete("leads", i)
-    b["status"] = "rolled_back"; db.put("importBatches", bid, b); audit(user, "import.rollback", "import", bid, f"{len(b['created_ids'])} removed"); return b
+    ids = list(b["created_ids"]); camp_ids = {l.get("campaign_id") for l in db.query("leads", [("import_batch_id", "==", bid)]) if l.get("campaign_id")}
+    for t in for_leads("tasks", ids): db.delete("tasks", t["id"])
+    for s in for_leads("suggestions", ids): db.delete("suggestions", s["id"])       # open Today suggestions about leads that no longer exist
+    for i in ids: db.delete("leads", i)
+    gone = remove_empty_import_campaigns(camp_ids)                                   # the whole list goes: its campaign too, so it leaves every dropdown and is not re-synced
+    b.update(status="rolled_back", removed_campaigns=gone); db.put("importBatches", bid, b)
+    audit(user, "import.rollback", "import", bid, f"{len(ids)} leads removed" + (f", campaign removed: {', '.join(gone)}" if gone else "")); return b
+
+REMOVABLE_CAMPAIGN_SOURCES = ("apollo_list", "apollo", "import")     # campaigns the system made from an import or sync. A campaign someone made by hand is never auto-removed.
+
+def remove_empty_import_campaigns(cids=None):
+    """Delete import- or sync-made campaigns that hold no leads any more (cids=None checks all of them). Returns the names removed."""
+    cs = [db.get("campaigns", i) for i in cids] if cids is not None else db.list("campaigns"); gone = []
+    for c in cs:
+        if c and c.get("source") in REMOVABLE_CAMPAIGN_SOURCES and not db.query("leads", [("campaign_id", "==", c["id"])], limit=1): db.delete("campaigns", c["id"]); gone.append(c["name"])
+    return gone
 
 def csv_safe(v):
     v = "" if v is None else str(v)
@@ -553,6 +597,8 @@ def sync_apollo_campaigns(user):
         except HTTPException as e: out["emails"] = {"error": str((e.detail or {}).get("message", "error"))}
     try: out["lists"] = sync_apollo_lists(user)             # re-sync the Apollo call lists you chose before (none chosen: nothing happens)
     except HTTPException as e: out["lists"] = {"error": str((e.detail or {}).get("message", "error"))}
+    try: out["companies"] = co.sync_apollo(user)             # and the company lists chosen before, so signals stay current
+    except HTTPException as e: out["companies"] = {"error": str((e.detail or {}).get("message", "error"))}
     audit(user, "campaign.apollo_sync", "campaign", "", f"{len(seqs)} in Apollo, {len(active)} active: {created} created, {updated} updated, {archived} archived; leads {out['leads_created']} created, {out['leads_duplicate']} duplicates")
     return out
 
@@ -729,7 +775,7 @@ def enrichment_preview(user):
     return {"configured": apollo_configured(), "qualifying": n, "will_run": run, "remaining_after": n - run, "batch_size": ENRICH_BATCH, "api_calls": ceil(run / ENRICH_BATCH),
             "busy": bool(_active_jobs()), "credit_note": CREDIT_NOTE, "pending_note": None if apollo_configured() else PENDING_APOLLO}
 
-def create_enrichment(user, ids, confirm, all_=False):
+def create_enrichment(user, ids, confirm, all_=False, refresh=False):
     if not can(user, "enrich"): err("forbidden", "Not allowed", 403)
     if not confirm: err("confirm_required", "Enrichment may consume Apollo credits. Confirm to continue.", 422)
     _need_apollo()
@@ -743,10 +789,10 @@ def create_enrichment(user, ids, confirm, all_=False):
         ids = [i for i in dict.fromkeys(ids) if i not in busy][:ENRICH_MAX_JOB]
         if not ids: err("duplicate_request", "These leads are already being enriched", 409)
         leads = [get_lead(user, i) for i in ids]
-    return db.put("enrichmentJobs", uid("enr"), {"status": "queued", "scope": "all" if all_ else "selected", "lead_ids": ids, "total": len(ids), "processed": 0, "credits_used": 0,
+    return db.put("enrichmentJobs", uid("enr"), {"status": "queued", "scope": "all" if all_ else "selected", "refresh": bool(refresh), "lead_ids": ids, "total": len(ids), "processed": 0, "credits_used": 0,
                   "items": [{"lead_id": l["id"], "name": l["full_name"], "status": "pending"} for l in leads], "by": user["id"], "by_name": user["name"], "at": now(), "provider": "apollo", "demo": False})
 
-def _apply_match(it, l, p):
+def _apply_match(it, l, p, refresh=False):
     """Apply one Apollo match to a lead. Never marks a lead enriched without a usable match; never overwrites verified or existing values."""
     if not p or p.get("match_confidence") in ("none", "low"):
         it["status"] = "no_match"; l["enrichment_state"] = "no_match"; save_lead(l); return
@@ -755,7 +801,7 @@ def _apply_match(it, l, p):
     applied = {}
     for f, v in res.items():
         if f in l.get("verified_fields", []): continue                      # preserve user-verified values
-        if l.get(f) and "*" not in str(l.get(f)): continue                  # preserve existing values (except Apollo-masked "Sh***" last names)
+        if l.get(f) and "*" not in str(l.get(f)) and not (refresh and l.get(f) != v): continue   # keep existing values; a refresh updates ones Apollo now reports differently (verified values are still kept)
         l["provenance"][f] = {"provider": "apollo", "at": now(), "prev": l.get(f, "")}; l[f] = v; applied[f] = v
     if applied: l["enrichment_state"], l["last_enriched_at"] = "enriched", now()
     else: l["enrichment_state"] = l["enrichment_state"] if l["enrichment_state"] == "enriched" else "no_new_data"
@@ -779,7 +825,7 @@ def run_enrichment(jid):
             matches = data.get("matches")
             if not isinstance(matches, list) or len(matches) != len(chunk): raise ValueError("Apollo returned an unexpected response")
             for (it, l, _), p in zip(chunk, matches):
-                try: _apply_match(it, l, p)
+                try: _apply_match(it, l, p, j.get("refresh"))
                 except Exception as e: it.update(status="error", error=str(e)[:120])
             j["credits_used"] = round(j.get("credits_used", 0) + float(data.get("credits_consumed") or 0), 2)
         except HTTPException as e:
@@ -863,7 +909,7 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
     meta = {l["id"]: l for l in apollo_lists(user)}
     bad = [i for i in label_ids if i not in meta]
     if explicit and bad: err("bad_list", "One of those lists was not found in Apollo (or is not a people list).", 422)
-    leads = active_leads(); bid = uid("imp"); ids = []; created = dup = linked = scanned = 0; trunc = False; n = len(db.list("campaigns")); done = 0
+    leads = active_leads(); bid = uid("imp"); ids = []; created = dup = linked = scanned = 0; trunc = False; n = len(db.list("campaigns")); done = 0; why = Counter()
     for lid in [i for i in label_ids if i in meta]:
         name = meta[lid]["name"]; hit = db.query("campaigns", [("apollo_label_id", "==", lid)], limit=1)
         if hit: camp = hit[0]; camp.update({"name": name, "archived": False, "synced_at": now()}); db.put("campaigns", camp["id"], camp)
@@ -877,7 +923,7 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
                 if not (r["first_name"] or r["last_name"]): continue
                 d, conf, sig = find_dupe(r, leads)
                 if d:
-                    dup += 1
+                    dup += 1; why[sig] += 1
                     if r["apollo_contact_id"] and not d.get("apollo_contact_id"): d["apollo_contact_id"] = r["apollo_contact_id"]; save_lead(d)
                     if d.get("channels") and "call" not in d["channels"]: d["channels"] = d["channels"] + ["call"]; save_lead(d)
                     if not d.get("campaign_id"): d["campaign_id"] = camp["id"]; save_lead(d); linked += 1
@@ -887,9 +933,9 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
             if not people or len(people) < 100 or (tp and page >= tp): break
             if page >= max_pages: trunc = True; break
             page += 1
-    if created: db.put("importBatches", bid, {"file": "Apollo list sync", "status": "done", "columns": [], "sample": [], "row_count": scanned, "created": created, "updated": 0, "skipped": dup, "invalid": 0, "created_ids": ids, "by": user["id"], "by_name": user["name"], "at": now(), "source": "Apollo"})
+    if created: db.put("importBatches", bid, {"file": "Apollo list sync", "status": "done", "columns": [], "sample": [], "row_count": scanned, "created": created, "updated": 0, "skipped": dup, "invalid": 0, "created_ids": ids, "by": user["id"], "by_name": user["name"], "at": now(), "source": "Apollo", "skipped_by": dict(why)})
     audit(user, "list.apollo_sync", "campaign", "", f"{done} lists, {created} leads created, {dup} already in CRM")
-    return {"lists": done, "leads_created": created, "leads_duplicate": dup, "leads_linked": linked, "contacts_scanned": scanned, "truncated": trunc}
+    return {"lists": done, "leads_created": created, "leads_duplicate": dup, "leads_linked": linked, "contacts_scanned": scanned, "truncated": trunc, "skipped_by": dict(why)}
 
 # Fit ranking: transparent and deterministic. Every point is shown to the user. Edit the numbers here to change what "most fit" means.
 SENIORITY_TIERS = [(25, r"\b(ceo|cto|cfo|coo|cmo|cro|chief|owner|founder|co-?founder|partner|president|managing director)\b"), (20, r"\b(vp|vice president|head)\b"), (20, r"\bdirector\b"), (10, r"\bmanager\b"), (5, r"\b(senior|lead|principal)\b")]
@@ -898,7 +944,7 @@ MAX_ASSIGN = 500                          # leads per assignment run
 
 def fit_score(l):
     """0-100 and the reasons: a signal (35, +5 with a source link), seniority of the title (up to 25), a phone number (15, calls need one), email (5), company (5), LinkedIn (5)."""
-    pts = []; sig = (l.get("signal") or "").strip()
+    pts = []; sig = signal(l)
     if sig:
         pts.append((f"Signal: {sig[:60]}", 35))
         if (l.get("signal_url") or "").strip(): pts.append(("Signal has a source link", 5))
@@ -922,7 +968,7 @@ def _pool_rows(user, f):
     for l in ls:
         sc, why = fit_score(l)
         if sc < int(f.get("min_fit") or 0): continue
-        if f.get("signal") and not (l.get("signal") or "").strip(): continue
+        if f.get("signal") and not signal(l): continue
         if f.get("phone") and not n_phone(l.get("phone")): continue
         rows.append((sc, l, why, camps))
     rows.sort(key=lambda r: (-r[0], r[1]["created_at"])); return rows
@@ -932,7 +978,7 @@ def assignment_pool(user, f=None, limit=200):
     if not can(user, "assign"): err("forbidden", "Only managers and outreach can assign leads", 403)
     rows = _pool_rows(user, f)
     return {"total": len(rows), "items": [{"id": l["id"], "full_name": l["full_name"], "title": l.get("title", ""), "company": l.get("company", ""), "campaign_id": l.get("campaign_id"), "source": l["source"],
-                                          "signal": l.get("signal", ""), "signal_url": l.get("signal_url", ""), "has_phone": bool(n_phone(l.get("phone"))), "channels": lead_channels(l, camps),
+                                          "signal": signal(l), "signal_url": l.get("signal_url", ""), "has_phone": bool(n_phone(l.get("phone"))), "channels": lead_channels(l, camps),
                                           "fit": sc, "why": why, "created_at": l["created_at"]} for sc, l, why, camps in rows[:limit]]}
 
 def assignees(user):
@@ -956,7 +1002,7 @@ def intake_overview(user):
         mu = [l for l in members if l["id"] in unid]; done = not mu; rev = (b or {}).get("reviewed_at")
         top = [camps[c]["name"] for c, _ in Counter(l.get("campaign_id") for l in members).most_common(3) if c in camps]
         return {"id": bid, "label": label, "source": source, "at": at, "by": by_name, "total": len(members), "unassigned": len(mu), "assigned": len(members) - len(mu),
-                "with_signal": sum(bool((l.get("signal") or "").strip()) for l in mu), "with_phone": sum(bool(n_phone(l.get("phone"))) for l in mu),
+                "with_signal": sum(bool(signal(l)) for l in mu), "with_phone": sum(bool(n_phone(l.get("phone"))) for l in mu),
                 "avg_fit": round(sum(fit[l["id"]] for l in mu) / len(mu)) if mu else 0, "campaigns": top, "reviewed_at": rev, "reviewed_by": (b or {}).get("reviewed_by_name"),
                 "status": "done" if done else "reviewed" if rev else "new"}
     rows = []
@@ -965,7 +1011,7 @@ def intake_overview(user):
         rows.append(row(b["id"], b.get("file") or "Import", b.get("source") or "File upload", b["at"], b.get("by_name", ""), by[b["id"]], b))
     if any(l["id"] in unid for l in by.get("", [])): rows.append(row("none", "Added manually or earlier", "Manual", "", "", by[""]))
     rank = {"new": 0, "reviewed": 1, "done": 2}; rows.sort(key=lambda r: r["at"], reverse=True); rows.sort(key=lambda r: (rank[r["status"]], r["at"] == ""))      # to review first, newest first; manual row last
-    return {"summary": {"unassigned": len(un), "new_7d": sum(l["created_at"] >= week for l in un), "with_signal": sum(bool((l.get("signal") or "").strip()) for l in un), "with_phone": sum(bool(n_phone(l.get("phone"))) for l in un),
+    return {"summary": {"unassigned": len(un), "new_7d": sum(l["created_at"] >= week for l in un), "with_signal": sum(bool(signal(l)) for l in un), "with_phone": sum(bool(n_phone(l.get("phone"))) for l in un),
                         "avg_fit": round(sum(fit.values()) / len(fit)) if fit else 0, "batches_to_review": sum(r["status"] == "new" and r["id"] != "none" for r in rows)}, "batches": rows, "people": assignees(user)}
 
 def review_batch(user, bid):
@@ -1050,8 +1096,10 @@ def scoped(user, f):
     if f.get("owner"): eq["owner_id"] = None if f["owner"] == "unassigned" else f["owner"]
     if f.get("source"): eq["source"] = f["source"]
     if f.get("stage"): eq["stage"] = f["stage"]
-    if f.get("campaign"): eq["campaign_id"] = None if f["campaign"] == "none" else f["campaign"]
+    cs = _camp_set(f.get("campaign"))
+    if len(cs) == 1: eq["campaign_id"] = next(iter(cs))
     ls = [l for l in active_leads(user, **eq) if visible(user, l)]
+    if len(cs) > 1: ls = [l for l in ls if (l.get("campaign_id") or None) in cs]
     if f.get("channel"):
         camps = {c["id"]: c for c in db.list("campaigns")}; ls = [l for l in ls if _in_channel(l, camps, f["channel"])]
     ids = {l["id"] for l in ls}

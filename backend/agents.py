@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from collections import Counter, defaultdict
 from firebase import db, now, uid
 import services as sv
+import companies as co
 
 SYSTEM = {"id": "system", "name": "Scheduler", "role": "admin"}
 HOURS = [int(x) for x in os.getenv("SCHEDULE_HOURS", "8,13,18").split(",") if x.strip()]
@@ -38,7 +39,8 @@ def score(l, tasks, acts, n, nd):
         age = (nd - sv.dt(l["created_at"])).days; s += min(25, 10 + age * 2); why.append(f"Never contacted ({age}d old)")
     last = acts[-1] if acts else None
     if last and last["outcome"] in ("Interested", "Meeting Requested", "Connected") and (nd - sv.dt(last["at"])).days <= 7: s += 20; why.append(f"Recent outcome: {last['outcome']}")
-    if (l.get("signal") or "").strip(): s += 25; why.append("Signal: " + l["signal"].strip()[:90])
+    sig = sv.signal(l)
+    if sig: s += 25; why.append("Signal: " + sig[:90])
     if l["stage"] in ("Connected", "Qualified", "Meeting Scheduled"): s += 10; why.append(f"Warm stage: {l['stage']}")
     if l.get("touches", 0) >= 4 and not any(a["outcome"] in sv.ENGAGED_ALL for a in acts): s -= 15; why.append("4+ touches without a response")
     return max(0, min(100, s)), why
@@ -46,7 +48,7 @@ def score(l, tasks, acts, n, nd):
 def brief(l, acts, why, ch="call", pitch="", sender=""):
     """Deterministic drafts. The CRM never sends anything: a person reviews, then sends from their own phone/LinkedIn/inbox."""
     first = l.get("first_name") or l["full_name"]; co = l.get("company") or "your team"; last = acts[-1] if acts else None
-    hook = (l.get("signal") or "").strip().rstrip("."); src = f" (source: {l['signal_url']})" if hook and l.get("signal_url") else ""
+    hook = sv.signal(l).rstrip("."); src = f" (source: {l['signal_url']})" if hook and l.get("signal_url") else ""
     ctx = "Why now: " + "; ".join(why) + "."
     if ch == "linkedin":
         note = (f"Hi {first}, I came across {co} ({hook.lower()}). " if hook else f"Hi {first}, I work with teams like {co}. ") + f"We focus on {pitch}. Would be good to connect."
@@ -72,7 +74,7 @@ def _run(user, slot):
     n = now(); nd = datetime.now(timezone.utc); sd = sv.settings()["stale_days"]
     leads = [l for l in db.list("leads") if not l.get("archived")]; live = [l for l in leads if l["stage"] not in sv.TERMINAL and not l["suppressed"]]
     tasks = g([t for t in db.list("tasks") if t["status"] == "open"], "lead_id"); acts = g(sorted(db.list("activities"), key=lambda a: a["at"]), "lead_id")
-    def rank(): return sorted(((score(l, tasks.get(l["id"], []), acts.get(l["id"], []), n, nd), l) for l in live), key=lambda x: (not (x[1].get("signal") or "").strip(), -x[0][0]))   # signal leads first, then by score
+    def rank(): return sorted(((score(l, tasks.get(l["id"], []), acts.get(l["id"], []), n, nd), l) for l in live), key=lambda x: (not sv.signal(x[1]), -x[0][0]))   # signal leads first, then by score
     ranked = rank()
     old = db.list("suggestions"); blocked = set()
     for s in old:
@@ -107,13 +109,15 @@ def _run(user, slot):
     for field, norm in (("email", sv.n_email), ("phone", sv.n_phone)):
         grp = defaultdict(list)
         for l in leads:
-            k = norm(l.get(field)); k and grp[k].append(l)
+            k = norm(l.get(field))
+            if field == "phone" and k: k = k + "|" + (l.get("full_name") or "").lower()          # a shared switchboard number is not a duplicate: it must be the same name too
+            k and grp[k].append(l)
         for k, v in grp.items():
             if len(v) < 2: continue
             v.sort(key=lambda x: x["created_at"]); keep = v[0]
             for d in v[1:]:
                 if d["id"] in seen: continue
-                seen.add(d["id"]); add("archive_duplicate", "cleaner", d, f"Archive duplicate of {keep['full_name']}", f"{d['full_name']} shares the same {field} as {keep['full_name']} (created {keep['created_at'][:10]}). Archiving keeps history and can be reversed.", [{"text": f"Same {field}: {k}"}], 30, {"type": "archive"}, d.get("owner_id"))
+                seen.add(d["id"]); add("archive_duplicate", "cleaner", d, f"Archive duplicate of {keep['full_name']}", f"{d['full_name']} shares the same {field} as {keep['full_name']} (created {keep['created_at'][:10]}). Archiving keeps history and can be reversed.", [{"text": f"Same {field}: {k.split('|')[0]}"}], 30, {"type": "archive"}, d.get("owner_id"))
     need = sorted([l for l in live if l.get("enrichment_state") == "not_enriched" and (not l.get("phone") or not l.get("email"))], key=lambda l: l["created_at"], reverse=True)[:10]
     if need: add("enrich", "cleaner", None, f"Enrich {len(need)} leads missing phone or email", "Leads: " + ", ".join(l["full_name"] for l in need) + ".\nThis may use provider credits. Existing and verified values are never overwritten.", [{"text": "Missing contact data"}], 22, {"type": "enrich", "lead_ids": [l["id"] for l in need]}, None, key="enrich:" + hashlib.sha1(",".join(sorted(l["id"] for l in need)).encode()).hexdigest()[:10])
     # unassigned leads are handled in batches on the Intake / Assign pages, not as one suggestion per lead
@@ -124,7 +128,7 @@ def _run(user, slot):
         for c in items[:room]: db.put("suggestions", uid("sug"), {**c, "status": "proposed", "created_at": n, "run_slot": slot}); created[c["agent"]] += 1
     overdue = sum(t["due_at"] < n for ts in tasks.values() for t in ts); unassigned = sum(not l.get("owner_id") for l in live)
     db.put("suggestions", "sug_digest", {"kind": "digest", "channel": "ops", "agent": "digest", "lead_id": None, "lead_name": "", "owner_id": None, "title": "Run summary", "status": "proposed", "priority": 5, "created_at": n, "dedupe_key": "digest", "action": None, "evidence": [],
-            "body": f"{len(live)} active leads reviewed. {sum(created.values())} new suggestions ({', '.join(f'{AGENTS[k]} {v}' for k, v in created.items()) or 'none'}).\n{overdue} overdue follow-ups, {unassigned} unassigned leads, {sum(bool((l.get("signal") or "").strip()) for l in live)} leads with a signal.\nNothing has been changed. Approve or dismiss each suggestion."})
+            "body": f"{len(live)} active leads reviewed. {sum(created.values())} new suggestions ({', '.join(f'{AGENTS[k]} {v}' for k, v in created.items()) or 'none'}).\n{overdue} overdue follow-ups, {unassigned} unassigned leads, {sum(bool(sv.signal(l)) for l in live)} leads with a signal.\nNothing has been changed. Approve or dismiss each suggestion."})
     run = db.put("agentRuns", uid("run"), {"at": n, "slot": slot, "by": user["name"], "reviewed": len(live), "created": dict(created), "dropped_by_cap": dropped})
     for k, v in created.items(): event(k, f"proposed {v} item(s)")
     event("digest", f"Run finished ({slot}): {sum(created.values())} suggestions")
@@ -165,7 +169,8 @@ def dismiss(user, sid, reason=""):
 # ----------------------------------------------------------------------------- My day (the caller's Today: a live work list, no approval queue)
 LEAD_FIELDS = ("id", "first_name", "last_name", "full_name", "title", "company", "phone", "email", "linkedin_url", "stage", "signal", "signal_url", "campaign_id", "touches", "last_activity_at",
                "next_action", "next_action_due", "owner_id", "source", "created_at")
-BRIEF_LIMIT = 60      # talking points are prepared for the first N rows only
+BRIEF_LIMIT = 40      # talking points are prepared for the first N rows only
+COMPANY_LIMIT = 30    # full company brief is sent inline for the first N rows; the rest load on demand (keeps this response small and fast)
 
 def my_day(user):
     """Every lead assigned to the user, in working order: callbacks due, follow-ups due or overdue, new leads not contacted yet (ranked by fit), then the rest
@@ -185,6 +190,9 @@ def my_day(user):
                       "reason": "New lead, not contacted yet" if grp == "new" else f"Last activity {l['last_activity_at'][:10]}" if grp == "other" else f"{'Overdue' if t['due_at'] < n else 'Due today'}: {t['title']}",
                       "lead": {k: l.get(k) for k in LEAD_FIELDS} | {"channels": sv.lead_channels(l, camps)}})
     items.sort(key=lambda x: (x["rank"], x["due_at"] or "", -x["fit"], x["lead"]["created_at"]))
+    for i, x in enumerate(items):
+        c = co.for_lead(byid[x["lead"]["id"]]); x["has_company"] = bool(c)
+        if i < COMPANY_LIMIT: x["company"] = co.brief(c) if c else None
     top = items[:BRIEF_LIMIT]; acts = g(sorted(sv.for_leads("activities", [x["lead"]["id"] for x in top]), key=lambda a: a["at"]), "lead_id"); pitch = sv.settings()["pitch"]
     for x in top:
         sig = [w["label"] for w in x["fit_why"] if w["label"].startswith("Signal:")]
@@ -200,16 +208,16 @@ def my_day(user):
 def today(user):
     L = {l["id"]: l for l in db.list("leads")}
     acts = g(sorted(db.list("activities"), key=lambda a: a["at"]), "lead_id"); items = []
-    for s in sorted(db.list("suggestions"), key=lambda s: (not ((L.get(s.get("lead_id")) or {}).get("signal") or "").strip(), -s["priority"])):   # signal leads first
+    for s in sorted(db.list("suggestions"), key=lambda s: (not (sv.signal(L[s["lead_id"]]) if s.get("lead_id") in L else ""), -s["priority"])):   # signal leads first
         if s["status"] != "proposed" or (user["role"] == "caller" and s.get("owner_id") != user["id"]): continue
         l = L.get(s.get("lead_id")); d = dict(s)
-        if l: d["lead"] = {k: l.get(k) for k in ("id", "full_name", "title", "company", "stage", "phone", "email", "source", "owner_id", "next_action", "next_action_due", "attempts", "touches", "campaign_id", "linkedin_url", "last_activity_at", "signal", "signal_url")}; d["recent"] = [{"outcome": a["outcome"], "at": a["at"], "notes": a.get("notes", "")} for a in acts.get(l["id"], [])[-3:]][::-1]
+        if l: d["lead"] = {k: l.get(k) for k in ("id", "full_name", "title", "company", "stage", "phone", "email", "source", "owner_id", "next_action", "next_action_due", "attempts", "touches", "campaign_id", "linkedin_url", "last_activity_at", "signal", "signal_url")}; d["lead"]["signal"] = sv.signal(l); d["recent"] = [{"outcome": a["outcome"], "at": a["at"], "notes": a.get("notes", "")} for a in acts.get(l["id"], [])[-3:]][::-1]
         if d["kind"] == "enrich": d["leads"] = [{"id": i, "name": L[i]["full_name"]} for i in s["action"]["lead_ids"] if i in L]
         items.append(d)
     ls, ac, ts, op = sv.scoped(user, {}); s7, e7 = sv.period(7); k = sv.kpis(ls, ac, ts, op, s7, e7); vis = {l["id"] for l in ls}
     mine = [s for s in db.list("suggestions") if sv.inp(s.get("decided_at"), s7, e7) and (user["role"] != "caller" or s.get("owner_id") == user["id"])]
     week = {"leads_added": k["new_leads"], "calls": k["attempts"], "connected": k["connected"], "unique_contacted": k["unique_contacted"], "meetings": k["meetings"],
-            "tasks_done": sum(t["status"] == "done" and sv.inp(t.get("completed_at"), s7, e7) for t in ts), "leads_with_signal": sum(bool((l.get("signal") or "").strip()) and l["stage"] not in sv.TERMINAL for l in ls),
+            "tasks_done": sum(t["status"] == "done" and sv.inp(t.get("completed_at"), s7, e7) for t in ts), "leads_with_signal": sum(bool(sv.signal(l)) and l["stage"] not in sv.TERMINAL for l in ls),
             "approved": sum(s["status"] == "approved" for s in mine), "dismissed": sum(s["status"] == "dismissed" for s in mine)}
     lanes = Counter(l["stage"] for l in ls); st = sv.settings()["stages"]
     feed = [e for e in sorted(db.list("agentEvents"), key=lambda e: e["at"], reverse=True) if user["role"] != "caller" or e.get("owner_id") in (None, user["id"])][:14]

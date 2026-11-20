@@ -102,6 +102,10 @@ class ApolloImport(BaseModel):
     channels: List[str] = []
     owner_id: Optional[str] = None
 
+class CallsIn(BaseModel):
+    lead_ids: List[str]
+    confirm: bool = False
+
 class ApolloListSync(BaseModel):
     label_ids: List[str] = []
 

@@ -79,7 +79,7 @@ def meta(user=Depends(auth)):
     s = sv.settings(); perms = sorted(sv.PERMS[user["role"]])
     users = [{"id": u["id"], "name": u["name"], "role": u["role"]} for u in db.list("users") if u.get("active", True)]
     return {"me": {k: user.get(k) for k in ("id", "name", "role", "email")}, "perms": perms, "auth_disabled": AUTH_DISABLED, "stages": s["stages"], "outcomes": s["outcomes"],
-            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "ai": ai.status(), "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
+            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "ai": ai.status(), "apollo_links": sv.apollo_links(), "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
 
 # ------------------------------------------------------------------ leads
 @app.get(V + "/leads")
@@ -213,6 +213,15 @@ def intake(user=Depends(need("assign"))): return sv.intake_overview(user)
 
 @app.post(V + "/intake/batches/{bid}/review")
 def intake_review(bid: str, user=Depends(need("assign"))): return sv.review_batch(user, bid)
+
+@app.post(V + "/apollo/calls/scan")
+def calls_scan_route(b: CallsIn, user=Depends(need("enrich"))): return sv.calls_scan(user, b.lead_ids)
+
+@app.post(V + "/apollo/calls/sync")
+def calls_sync_route(b: CallsIn, user=Depends(need("enrich"))): return sv.calls_sync(user, b.lead_ids, b.confirm)
+
+@app.get(V + "/leads/{lid}/transcripts")
+def lead_transcripts_route(lid: str, user=Depends(need("leads:read"))): return sv.lead_transcripts(user, lid)
 
 @app.get(V + "/assign/people")
 def assign_people(user=Depends(need("assign"))): return sv.assignees(user)

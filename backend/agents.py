@@ -168,7 +168,7 @@ def dismiss(user, sid, reason=""):
 
 # ----------------------------------------------------------------------------- My day (the caller's Today: a live work list, no approval queue)
 LEAD_FIELDS = ("id", "first_name", "last_name", "full_name", "title", "company", "phone", "email", "linkedin_url", "stage", "signal", "signal_url", "campaign_id", "touches", "last_activity_at",
-               "next_action", "next_action_due", "owner_id", "source", "created_at")
+               "next_action", "next_action_due", "owner_id", "source", "created_at", "apollo_id", "apollo_contact_id", "phone_type")
 BRIEF_LIMIT = 40      # talking points are prepared for the first N rows only
 COMPANY_LIMIT = 30    # full company brief is sent inline for the first N rows; the rest load on demand (keeps this response small and fast)
 

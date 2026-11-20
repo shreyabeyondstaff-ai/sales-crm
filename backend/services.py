@@ -141,7 +141,7 @@ def new_lead(data, user, batch=None, demo=False, created=None, owner=None):
     l = {f: (data.get(f) or "").strip() if isinstance(data.get(f), str) else (data.get(f) or "") for f in FIELDS}
     l.update({"full_name": f"{l['first_name']} {l['last_name']}".strip(), "email": n_email(l["email"]),
               "source": data.get("source") or "Manual", "source_detail": data.get("source_detail", ""),
-              "channels": [c for c in dict.fromkeys(data.get("channels") or []) if c in CH3], "apollo_id": data.get("apollo_id", ""), "apollo_contact_id": data.get("apollo_contact_id", ""), "owner_id": (owner if owner is not None else data.get("owner_id")) or None,
+              "channels": [c for c in dict.fromkeys(data.get("channels") or []) if c in CH3], "apollo_id": data.get("apollo_id", ""), "apollo_contact_id": data.get("apollo_contact_id", ""), "phone_type": data.get("phone_type", ""), "owner_id": (owner if owner is not None else data.get("owner_id")) or None,
               "stage": "New", "stage_history": [{"stage": "New", "at": t, "by": user["id"]}], "tags": data.get("tags", []),
               "created_at": t, "updated_at": t, "created_by": user["id"], "import_batch_id": batch, "archived": False,
               "suppressed": False, "verified_fields": [], "provenance": {}, "enrichment_state": "not_enriched",
@@ -218,6 +218,7 @@ def update_lead(user, lid, patch):
     for k, v in p.items():
         if k in FIELDS and v != l.get(k):
             l[k] = n_email(v) if k == "email" else v
+            if k == "phone": l["phone_type"] = ""                       # a person typed it: its kind is unknown
             if k not in ("verified_fields",) and k in ("email", "phone", "title", "company"): l["verified_fields"] = list(set(l["verified_fields"] + [k]))  # user edits are "user-verified"
         elif k == "channels": l["channels"] = [c for c in dict.fromkeys(v or []) if c in CH3]
         elif k in ("tags", "verified_fields", "campaign_id"): l[k] = v or ([] if k != "campaign_id" else None)
@@ -542,7 +543,10 @@ def _apollo(path, params=None, body=None, method="POST"):
             if attempt < 2 and wait <= 15: time.sleep(wait); continue          # short limit: wait and retry
             err("apollo_rate_limited", f"Apollo rate limit reached. Try again in about {max(wait, 1)} seconds (limits depend on your Apollo plan).", 429)
         if r.status_code in (401, 403): err("apollo_auth", "Apollo rejected the API key: it is wrong, or it has no access to this endpoint (some endpoints need a master API key). Check APOLLO_API_KEY.", 502)
-        if r.status_code == 422: err("apollo_bad_request", "Apollo rejected the request parameters.", 422)
+        if r.status_code == 422:
+            if "credit" in (getattr(r, "text", "") or "").lower(): err("apollo_no_credits", "Apollo says you are out of credits. Add credits in Apollo, then try again.", 422)
+            err("apollo_bad_request", "Apollo rejected the request parameters.", 422)
+        if r.status_code == 404: err("apollo_not_found", "Apollo could not find that item, or your key cannot access it.", 404)
         if r.status_code >= 400: err("apollo_error", f"Apollo returned an error ({r.status_code}).", 502)
         return r.json()
 
@@ -617,15 +621,16 @@ def _import_sequence_contacts(user, cid_by_seq, name_by_seq, max_pages=100):
             m = max(ms, key=lambda x: x.get("added_at") or ""); cid = cid_by_seq[m["emailer_campaign_id"]]
             org = p.get("organization") or {}
             loc = p.get("present_raw_address") or ", ".join(x for x in (p.get("city"), p.get("state"), p.get("country")) if x)
-            ph = p.get("sanitized_phone") or next((x.get("sanitized_number") or x.get("raw_number") for x in (p.get("phone_numbers") or []) if x.get("sanitized_number") or x.get("raw_number")), "")
+            ph, pt = _best_phone(p)
             r = {"first_name": p.get("first_name") or "", "last_name": p.get("last_name") or "", "title": p.get("title") or "", "company": p.get("organization_name") or org.get("name") or "",
-                 "email": _ap_email(p), "phone": ph or "", "linkedin_url": p.get("linkedin_url") or "", "location": loc or "", "apollo_id": p.get("person_id") or p.get("id") or "",
+                 "email": _ap_email(p), "phone": ph or "", "phone_type": pt, "linkedin_url": p.get("linkedin_url") or "", "location": loc or "", "apollo_id": p.get("person_id") or p.get("id") or "",
                  "source": "Apollo", "campaign_id": cid, "channels": ["email"], "apollo_contact_id": p.get("id") or "", "tags": [f"apollo-{m.get('status') or 'unknown'}"], "source_detail": f"Apollo sequence: {name_by_seq[m['emailer_campaign_id']]}"}
             if not (r["first_name"] or r["last_name"]): continue
             d, conf, sig = find_dupe(r, leads)
             if d:
                 dup += 1
                 if p.get("id") and not d.get("apollo_contact_id"): d["apollo_contact_id"] = p["id"]; save_lead(d)      # backfill, so emails can be matched
+                _refresh_phone(d, r)
                 if d.get("channels") and "email" not in d["channels"]: d["channels"] = d["channels"] + ["email"]; save_lead(d)
                 if not d.get("campaign_id"): d["campaign_id"] = cid; save_lead(d); linked += 1
                 continue
@@ -889,12 +894,37 @@ def apollo_lists(user):
            for x in items if x.get("modality") == "contacts" and (x.get("id") or x.get("_id"))]
     return sorted(out, key=lambda x: x["name"].lower())
 
+def _best_phone(p):
+    """The number to call for an Apollo contact: a direct or mobile line before the company's HQ switchboard (type 'work_hq'). Returns (number, type)."""
+    num = lambda x: x.get("sanitized_number") or x.get("raw_number") or ""
+    kind = lambda x: str(x.get("type") or x.get("type_cd") or "")
+    pns = sorted([x for x in (p.get("phone_numbers") or []) if num(x)], key=lambda x: x.get("position") if isinstance(x.get("position"), int) else 99)
+    sp = p.get("sanitized_phone")
+    if sp:                                                              # Apollo's own default for this contact
+        m = next((x for x in pns if num(x) == sp), None); return sp, (kind(m) if m and kind(m) else "direct")
+    direct = [x for x in pns if kind(x) != "work_hq"]
+    pick = (direct or pns or [None])[0]
+    return (num(pick), kind(pick)) if pick else ("", "")
+
+def _refresh_phone(d, r):
+    """A synced contact may now have a better number than the lead stored (a direct line instead of the company switchboard).
+    Never touches a number a person typed (verified) or that enrichment set. Returns True if the number changed."""
+    new, nt = r.get("phone") or "", r.get("phone_type") or ""
+    if not new or "phone" in (d.get("verified_fields") or []) or (d.get("provenance") or {}).get("phone"): return False
+    old = d.get("phone") or ""
+    if n_phone(old) == n_phone(new):
+        if not d.get("phone_type") and nt: d["phone_type"] = nt; save_lead(d)          # same number: just label what it is
+        return False
+    if old:                                                                   # replacing a number is only allowed as an upgrade: switchboard (or Apollo-synced, kind unknown) -> direct line
+        if not ((d.get("phone_type") == "work_hq" or (not d.get("phone_type") and d.get("source") == "Apollo")) and nt not in ("", "work_hq")): return False
+    d.setdefault("provenance", {})["phone"] = {"provider": "apollo", "at": now(), "prev": old}; d["phone"], d["phone_type"] = new, nt; save_lead(d); return True
+
 def _contact_lead(p, cid, list_name):
     org = p.get("organization") or {}
     loc = p.get("present_raw_address") or ", ".join(x for x in (p.get("city"), p.get("state"), p.get("country")) if x)
-    ph = p.get("sanitized_phone") or next((x.get("sanitized_number") or x.get("raw_number") for x in (p.get("phone_numbers") or []) if x.get("sanitized_number") or x.get("raw_number")), "")
+    ph, pt = _best_phone(p)
     return {"first_name": p.get("first_name") or "", "last_name": p.get("last_name") or "", "title": p.get("title") or "", "company": p.get("organization_name") or org.get("name") or "",
-            "email": _ap_email(p), "phone": ph or "", "linkedin_url": p.get("linkedin_url") or "", "location": loc or "", "apollo_id": p.get("person_id") or p.get("id") or "",
+            "email": _ap_email(p), "phone": ph or "", "phone_type": pt, "linkedin_url": p.get("linkedin_url") or "", "location": loc or "", "apollo_id": p.get("person_id") or p.get("id") or "",
             "apollo_contact_id": p.get("id") or "", "source": "Apollo", "source_detail": f"Apollo list: {list_name}", "campaign_id": cid, "channels": ["call"]}
 
 def sync_apollo_lists(user, label_ids=None, max_pages=100):
@@ -909,7 +939,7 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
     meta = {l["id"]: l for l in apollo_lists(user)}
     bad = [i for i in label_ids if i not in meta]
     if explicit and bad: err("bad_list", "One of those lists was not found in Apollo (or is not a people list).", 422)
-    leads = active_leads(); bid = uid("imp"); ids = []; created = dup = linked = scanned = 0; trunc = False; n = len(db.list("campaigns")); done = 0; why = Counter()
+    leads = active_leads(); bid = uid("imp"); ids = []; created = dup = linked = scanned = phones = 0; trunc = False; n = len(db.list("campaigns")); done = 0; why = Counter()
     for lid in [i for i in label_ids if i in meta]:
         name = meta[lid]["name"]; hit = db.query("campaigns", [("apollo_label_id", "==", lid)], limit=1)
         if hit: camp = hit[0]; camp.update({"name": name, "archived": False, "synced_at": now()}); db.put("campaigns", camp["id"], camp)
@@ -925,6 +955,7 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
                 if d:
                     dup += 1; why[sig] += 1
                     if r["apollo_contact_id"] and not d.get("apollo_contact_id"): d["apollo_contact_id"] = r["apollo_contact_id"]; save_lead(d)
+                    phones += _refresh_phone(d, r)                        # a direct line Apollo has found since replaces the company switchboard number
                     if d.get("channels") and "call" not in d["channels"]: d["channels"] = d["channels"] + ["call"]; save_lead(d)
                     if not d.get("campaign_id"): d["campaign_id"] = camp["id"]; save_lead(d); linked += 1
                     continue
@@ -935,7 +966,7 @@ def sync_apollo_lists(user, label_ids=None, max_pages=100):
             page += 1
     if created: db.put("importBatches", bid, {"file": "Apollo list sync", "status": "done", "columns": [], "sample": [], "row_count": scanned, "created": created, "updated": 0, "skipped": dup, "invalid": 0, "created_ids": ids, "by": user["id"], "by_name": user["name"], "at": now(), "source": "Apollo", "skipped_by": dict(why)})
     audit(user, "list.apollo_sync", "campaign", "", f"{done} lists, {created} leads created, {dup} already in CRM")
-    return {"lists": done, "leads_created": created, "leads_duplicate": dup, "leads_linked": linked, "contacts_scanned": scanned, "truncated": trunc, "skipped_by": dict(why)}
+    return {"lists": done, "leads_created": created, "leads_duplicate": dup, "leads_linked": linked, "contacts_scanned": scanned, "truncated": trunc, "skipped_by": dict(why), "phones_updated": phones}
 
 # Fit ranking: transparent and deterministic. Every point is shown to the user. Edit the numbers here to change what "most fit" means.
 SENIORITY_TIERS = [(25, r"\b(ceo|cto|cfo|coo|cmo|cro|chief|owner|founder|co-?founder|partner|president|managing director)\b"), (20, r"\b(vp|vice president|head)\b"), (20, r"\bdirector\b"), (10, r"\bmanager\b"), (5, r"\b(senior|lead|principal)\b")]
@@ -943,7 +974,7 @@ ASSIGNABLE = ("caller", "outreach")      # roles that can own and work leads
 MAX_ASSIGN = 500                          # leads per assignment run
 
 def fit_score(l):
-    """0-100 and the reasons: a signal (35, +5 with a source link), seniority of the title (up to 25), a phone number (15, calls need one), email (5), company (5), LinkedIn (5)."""
+    """0-100 and the reasons: a signal (35, +5 with a source link), seniority of the title (up to 25), a direct phone number (15; only 5 if it is just the company switchboard), email (5), company (5), LinkedIn (5)."""
     pts = []; sig = signal(l)
     if sig:
         pts.append((f"Signal: {sig[:60]}", 35))
@@ -951,7 +982,7 @@ def fit_score(l):
     t = (l.get("title") or "").lower()
     for p_, rx in SENIORITY_TIERS:
         if re.search(rx, t): pts.append((f"Senior title: {l['title']}", p_)); break
-    if n_phone(l.get("phone")): pts.append(("Has a phone number", 15))
+    if n_phone(l.get("phone")): pts.append(("Has only a company switchboard number", 5) if l.get("phone_type") == "work_hq" else ("Has a direct phone number", 15))
     if l.get("email"): pts.append(("Has an email", 5))
     if (l.get("company") or "").strip(): pts.append(("Company known", 5))
     if (l.get("linkedin_url") or "").strip(): pts.append(("Has a LinkedIn profile", 5))
@@ -1057,6 +1088,94 @@ def assign_run(user, people, mode, f, dry_run=True):
     for pl in plan: pl["assigned"] = done[pl["user_id"]]; pl.pop("sample")
     audit(user, "assign.bulk", "lead", "", f"{sum(done.values())} leads ({mode}): " + ", ".join(f"{users[u]['name']} {done[u]}" for u in want))
     return {"dry_run": False, "assigned": sum(done.values()), "pool": len(pool), "plan": plan, "shortfall": sum(want.values()) - sum(done.values())}
+
+# ----------------------------------------------------------------------------- Apollo links + call recordings and transcripts (Apollo Conversations)
+APOLLO_CONTACT_URL = "https://app.apollo.io/#/contacts/{id}"     # Apollo's docs do not publish page addresses: override with APOLLO_CONTACT_URL / APOLLO_PERSON_URL if yours differs
+APOLLO_PERSON_URL = "https://app.apollo.io/#/people/{id}"
+CALL_FETCH_CAP = 25        # transcripts fetched per run (fetching one can cost 1 Apollo credit)
+CALL_SCAN_MAX_LEADS = 100  # leads looked up per run
+
+def apollo_links():
+    """Templates the page uses for 'Open in Apollo'. Only https addresses containing {id} are accepted."""
+    def pick(env, default):
+        v = (os.getenv(env) or "").strip(); return v if v.startswith("https://") and "{id}" in v else default
+    return {"contact": pick("APOLLO_CONTACT_URL", APOLLO_CONTACT_URL), "person": pick("APOLLO_PERSON_URL", APOLLO_PERSON_URL)}
+
+def _conv_search(contact_id):
+    """Every conversation Apollo has for one contact (POST /conversations/search, 0 credits: summaries only, no transcripts)."""
+    out, seen, page = [], set(), 1
+    while page <= 10:
+        data = _apollo("/conversations/search", body={"contact_ids": [contact_id], "page": page}) or {}
+        got = [c for c in (data.get("conversations") or []) if c.get("id") and c["id"] not in seen]
+        if not got: break
+        seen.update(c["id"] for c in got); out += got; tp = (data.get("pagination") or {}).get("total_pages")
+        if tp and page >= tp: break
+        page += 1
+    return out
+
+def _transcript_text(segments):
+    """Apollo returns a transcript as a list of sentences; join them as 'Speaker: what they said', merging a speaker's consecutive sentences."""
+    lines, last = [], None
+    for seg in segments or []:
+        t = (seg.get("spoken_sentence") or "").strip()
+        if not t: continue
+        who = seg.get("participant_name") or "Speaker"
+        if who == last: lines[-1] += " " + t
+        else: lines.append(f"{who}: {t}"); last = who
+    return "\n".join(lines)
+
+def _call_targets(user, lead_ids):
+    ids = list(dict.fromkeys(lead_ids))[:CALL_SCAN_MAX_LEADS]; leads = [get_lead(user, i) for i in ids]
+    return leads, [l for l in leads if not l.get("apollo_contact_id")]
+
+def calls_scan(user, lead_ids):
+    """Free look-up (no credits): how many calls does Apollo have for these leads, and how many are not attached yet."""
+    if not can(user, "enrich"): err("forbidden", "Only managers and outreach can sync calls", 403)
+    _need_apollo(); leads, nocid = _call_targets(user, lead_ids); res = {"leads": len(leads), "no_contact_id": len(nocid), "conversations": 0, "new": 0, "already": 0, "inaccessible": 0, "fetch_cap": CALL_FETCH_CAP}
+    for l in leads:
+        if not l.get("apollo_contact_id"): continue
+        for c in _conv_search(l["apollo_contact_id"]):
+            res["conversations"] += 1
+            if c.get("can_access_conversation") is False: res["inaccessible"] += 1; continue
+            ex = db.get("transcripts", "tr_" + c["id"])
+            if ex and not ex.get("pending"): res["already"] += 1
+            else: res["new"] += 1
+    return res
+
+def calls_sync(user, lead_ids, confirm):
+    """Attach Apollo call recordings (as links) and transcripts to the leads. Needs confirm: fetching a transcript can cost 1 Apollo credit when the call has AI insights.
+    Only what Apollo returns is stored; no call activity is invented and nothing changes in Apollo. One document per conversation id, so re-syncing never duplicates."""
+    if not can(user, "enrich"): err("forbidden", "Only managers and outreach can sync calls", 403)
+    if not confirm: err("confirm_required", "Fetching call transcripts can use Apollo credits (1 per call that has AI insights). Confirm to continue.", 422)
+    _need_apollo(); leads, nocid = _call_targets(user, lead_ids)
+    res = {"leads": len(leads), "no_contact_id": len(nocid), "stored": 0, "pending": 0, "skipped": 0, "remaining": 0, "stopped": None}
+    todo = []
+    for l in leads:
+        if not l.get("apollo_contact_id"): continue
+        for c in _conv_search(l["apollo_contact_id"]):
+            if c.get("can_access_conversation") is False: res["skipped"] += 1; continue
+            ex = db.get("transcripts", "tr_" + c["id"])
+            if not (ex and not ex.get("pending")): todo.append((l, c))
+    res["remaining"] = max(0, len(todo) - CALL_FETCH_CAP)
+    for n, (l, c) in enumerate(todo[:CALL_FETCH_CAP]):
+        try: d = _apollo(f"/conversations/{c['id']}", method="GET") or {}
+        except HTTPException as e:
+            code = (e.detail or {}).get("code")
+            if code == "apollo_not_found": res["skipped"] += 1; continue
+            if code in ("apollo_no_credits", "apollo_auth", "apollo_rate_limited"): res["stopped"] = (e.detail or {}).get("message"); res["remaining"] = len(todo) - n; break              # this one and everything after it were not fetched
+            raise
+        text = _transcript_text(d.get("transcript")); names = [x for x in (c.get("participant_names") or []) if x]
+        db.put("transcripts", "tr_" + c["id"], {"lead_id": l["id"], "conversation_id": c["id"], "topic": d.get("topic") or c.get("topic") or "", "started_at": dt(d.get("start_time") or c["start_time"]).isoformat(timespec="seconds") if (d.get("start_time") or c.get("start_time")) else "",
+            "duration_s": d.get("duration") if d.get("duration") is not None else c.get("duration"), "conversation_type": d.get("conversation_type") or c.get("conversation_type") or "", "host": c.get("host") or d.get("host") or "",
+            "participants": names, "text": text[:300_000], "pending": not text, "summary": d.get("call_summary") if isinstance(d.get("call_summary"), dict) else None,
+            "audio_url": (d.get("audio_recording") or {}).get("url") or "", "video_url": (d.get("video_recording") or {}).get("url") or "", "fetched_at": now(), "fetched_by": user["id"]})
+        res["pending" if not text else "stored"] += 1
+    audit(user, "calls.apollo_sync", "lead", "", f"{res['stored']} transcripts attached, {res['pending']} not ready, {res['skipped']} skipped, {res['remaining']} left")
+    return res
+
+def lead_transcripts(user, lid):
+    get_lead(user, lid)          # same record scoping as the lead itself
+    return sorted(db.query("transcripts", [("lead_id", "==", lid)]), key=lambda t: t.get("started_at") or "", reverse=True)
 
 # ----------------------------------------------------------------------------- opportunities
 def list_opps(user):

@@ -41,7 +41,7 @@ The **admin** hands out work and does not work leads, so their home is **New dat
 
 ## Assign leads (the setup page for callers)
 Nav: **Assign leads** (admin, developer, outreach). The flow for call lists: upload your outreach list in Apollo, open this page, **Show my Apollo lists**, tick the list(s) and **Sync**. Each list becomes a **Calls** campaign and its contacts become unassigned leads (no sequences or emails involved). Below, all unassigned leads are ranked by **fit**, best first, and filterable by campaign, channel, source, minimum fit, "has a signal" and "has a phone".
-- **Fit (0 to 100, shown with a breakdown on hover):** signal 35 (+5 with a source link), title seniority up to 25, phone 15, email 5, company 5, LinkedIn 5. The numbers live in `fit_score()` in `services.py`: change them there to change what "most fit" means.
+- **Fit (0 to 100, shown with a breakdown on hover):** signal 35 (+5 with a source link), title seniority up to 25, direct phone 15 (5 if it is only the company switchboard), email 5, company 5, LinkedIn 5. The numbers live in `fit_score()` in `services.py`: change them there to change what "most fit" means.
 - **Assigning:** type how many leads each caller should get (for example 40), pick *Round-robin* (everyone gets a similar mix of strong and weaker leads) or *Best first* (the first person gets the top N, the next person the next N), **Preview**, then **Assign**. Max 500 per run. Each lead gets the usual first-contact task and an audit entry. The caller sees them in Sales Activity immediately; Today is refreshed in the background right after.
 - Only active callers and outreach users can receive leads. Running it again continues with the next best unassigned leads.
 

@@ -176,7 +176,8 @@ def my_day(user):
     """Every lead assigned to the user, in working order: callbacks due, follow-ups due or overdue, new leads not contacted yet (ranked by fit), then the rest
     of their assigned leads. Visibility is simply assignment (not channel, not whether Apollo already emailed them). Nothing waits for approval."""
     n = now(); end = n[:10] + "T23:59:59"
-    leads = [l for l in sv.active_leads(user, owner_id=user["id"], suppressed=False) if l["stage"] not in sv.TERMINAL]; byid = {l["id"]: l for l in leads}
+    arch = {c["id"] for c in db.list("campaigns") if c.get("archived")}                      # an archived campaign is hidden, and so are its leads on the working screens
+    leads = [l for l in sv.active_leads(user, owner_id=user["id"], suppressed=False) if l["stage"] not in sv.TERMINAL and l.get("campaign_id") not in arch]; byid = {l["id"]: l for l in leads}
     tasks = g(sv.list_tasks(user, "mine", "open"), "lead_id"); camps = {c["id"]: c for c in db.list("campaigns")}; items = []
     for l in leads:
         ts = tasks.get(l["id"], []); cb = sorted((t for t in ts if t["type"] == "callback" and t["due_at"] <= end), key=lambda t: t["due_at"])

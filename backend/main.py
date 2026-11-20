@@ -79,7 +79,7 @@ def meta(user=Depends(auth)):
     s = sv.settings(); perms = sorted(sv.PERMS[user["role"]])
     users = [{"id": u["id"], "name": u["name"], "role": u["role"]} for u in db.list("users") if u.get("active", True)]
     return {"me": {k: user.get(k) for k in ("id", "name", "role", "email")}, "perms": perms, "auth_disabled": AUTH_DISABLED, "stages": s["stages"], "outcomes": s["outcomes"],
-            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "ai": ai.status(), "apollo_links": sv.apollo_links(), "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
+            "sources": sv.SOURCES, "campaigns": [{"id": c["id"], "name": c["name"], "channel": c["channel"], "color": c["color"]} for c in db.list("campaigns") if not c.get("archived")], "outcomes_by_type": sv.OUTCOMES_BY_TYPE, "activity_types": sv.ACTIVITY_TYPES, "opp_stages": sv.OPP_STAGES, "users": users, "ai": ai.status(), "apollo_links": sv.apollo_links(), "archived_campaigns": [{"id": c["id"], "name": c["name"], "channel": c.get("channel", "mixed"), "color": c.get("color", "#9aa0b4")} for c in db.list("campaigns") if c.get("archived")], "demo": bool(db.query("leads", [("demo", "==", True)], limit=1))}
 
 # ------------------------------------------------------------------ leads
 @app.get(V + "/leads")

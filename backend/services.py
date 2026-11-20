@@ -338,7 +338,8 @@ def workspace_queue(user):
     """Daily calling queue: callbacks due > overdue > first contact > untouched. Priority is explained."""
     n = now(); items = {}
     own = {"owner_id": user["id"]} if user["role"] in ("caller", "outreach") else {}
-    mine = [l for l in active_leads(user, suppressed=False, **own) if l["stage"] not in TERMINAL]
+    arch = {c["id"] for c in db.list("campaigns") if c.get("archived")}                      # an archived campaign is hidden, and so are its leads on the working screens
+    mine = [l for l in active_leads(user, suppressed=False, **own) if l["stage"] not in TERMINAL and l.get("campaign_id") not in arch]
     byl = {l["id"]: l for l in mine}
     for t in list_tasks(user, "mine"):
         l = byl.get(t["lead_id"])

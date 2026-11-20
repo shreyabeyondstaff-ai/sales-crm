@@ -68,7 +68,7 @@ function tag(s) { return `<span class="tag">${esc(s)}</span>`; }
 // ---------------------------------------------------------------- campaign / channel helpers + inline charts (no libraries)
 const CH = { call: ["☎", "Calls"], linkedin: ["in", "LinkedIn"], email: ["✉", "Email"], mixed: ["◎", "Multi-channel"], ops: ["⚙", "Pipeline"] };
 const chBadge = c => `<span class="chb ${c}">${CH[c]?.[0] || ""} ${CH[c]?.[1] || esc(c)}</span>`;
-const campOf = id => S.campaigns.find(c => c.id === id) || { id: "none", name: "No campaign", channel: "mixed", color: "#9aa0b4" };
+const campOf = id => S.campaigns.find(c => c.id === id) || (a => a && { ...a, name: a.name + " (archived)" })((S.archivedCampaigns || []).find(c => c.id === id)) || { id: "none", name: "No campaign", channel: "mixed", color: "#9aa0b4" };
 const CH_OPTS = [["call", "Calls"], ["linkedin", "LinkedIn"], ["email", "Email"]];
 const leadChannels = l => (l.channels && l.channels.length) ? l.channels : (c => ["call", "linkedin", "email"].includes(c) ? [c] : [])(campOf(l.campaign_id).channel);
 const targetHtml = id => `<div class="card target" id="${id}"><b>Where should these leads go?</b>
@@ -87,7 +87,7 @@ function readTarget(root) {
   if (v === "__new" && !name) throw new Error("Type a name for the new campaign");
   return { channels, campaign_id: v && v !== "__new" ? v : null, new_campaign_name: v === "__new" ? name : null, owner_id: $(".it-own", root)?.value || null };
 }
-const refreshCampaigns = async () => { try { S.campaigns = (await api("/meta")).campaigns; } catch { } };
+const refreshCampaigns = async () => { try { const m = await api("/meta"); S.campaigns = m.campaigns; S.archivedCampaigns = m.archived_campaigns || []; } catch { } };
 const campOpts = (sel, blank) => opts(S.campaigns.map(c => [c.id, c.name]), sel, blank);
 const TYPE_OF = { call: "phone_call", linkedin: "linkedin", email: "email", mixed: "phone_call" };
 const initials = id => (uname(id) || "?").split(" ").map(x => x[0]).join("").slice(0, 2);
@@ -1021,7 +1021,7 @@ async function start() {
   let m; try { m = await api("/meta"); } catch (e) { return cannotStart(e.message); }
   let prev = null; try { prev = localStorage.getItem("crm_uid"); localStorage.setItem("crm_uid", m.me.id); } catch { }
   if (prev !== m.me.id) history.replaceState(null, "", "#/");                // a different person (or a first visit) always starts at the beginning
-  Object.assign(S, { me: m.me, perms: m.perms, stages: m.stages, outcomes: m.outcomes, sources: m.sources, users: m.users, types: m.activity_types, oppStages: m.opp_stages, campaigns: m.campaigns, obt: m.outcomes_by_type, ai: m.ai, apolloLinks: m.apollo_links });
+  Object.assign(S, { me: m.me, perms: m.perms, stages: m.stages, outcomes: m.outcomes, sources: m.sources, users: m.users, types: m.activity_types, oppStages: m.opp_stages, campaigns: m.campaigns, obt: m.outcomes_by_type, ai: m.ai, apolloLinks: m.apollo_links, archivedCampaigns: m.archived_campaigns || [] });
   $("#app").classList.remove("hidden");
   $("#me").innerHTML = `<span>${esc(m.me.name)} · ${esc(m.me.role)}</span><span class="av">${esc(m.me.name[0])}</span>${CFG.AUTH_ENABLED ? '<button class="btn sm" id="so">Sign out</button>' : ""}`;
   if (m.demo) $("#demoBadge").classList.remove("hidden");
